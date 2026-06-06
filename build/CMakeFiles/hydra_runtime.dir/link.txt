@@ -1,0 +1,2 @@
+/usr/bin/ar qc libhydra_runtime.a CMakeFiles/hydra_runtime.dir/src/runtime/WorkDeque.cpp.o CMakeFiles/hydra_runtime.dir/src/runtime/Worker.cpp.o CMakeFiles/hydra_runtime.dir/src/runtime/Runtime.cpp.o CMakeFiles/hydra_runtime.dir/src/metrics/Metrics.cpp.o
+/usr/bin/ranlib libhydra_runtime.a

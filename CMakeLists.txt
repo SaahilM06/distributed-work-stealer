@@ -18,8 +18,11 @@ add_compile_options(
   -Wpedantic
   -Wno-unused-parameter
   $<$<CONFIG:Release>:-O3>
-  $<$<CONFIG:RelWithDebInfo>:-O2 -g>
-  $<$<CONFIG:Debug>:-O0 -g -fsanitize=thread>
+  $<$<CONFIG:RelWithDebInfo>:-O2>
+  $<$<CONFIG:RelWithDebInfo>:-g>
+  $<$<CONFIG:Debug>:-O0>
+  $<$<CONFIG:Debug>:-g>
+  $<$<CONFIG:Debug>:-fsanitize=thread>
 )
 
 add_link_options(
