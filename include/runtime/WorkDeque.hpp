@@ -14,4 +14,5 @@ public:
     void        push(Task task);
     bool        pop(Task& out);
     std::size_t size() const;
+    bool        steal(Task& task);
 };

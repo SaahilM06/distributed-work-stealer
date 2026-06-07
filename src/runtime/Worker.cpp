@@ -3,29 +3,33 @@
 
 Worker::Worker(int id,
                WorkDeque& queue,
+               std::vector<WorkDeque*> all_queues,
                std::atomic<bool>& shutdown_flag,
                std::function<void()> on_complete)
     : id_(id)
     , queue_(queue)
+    , all_queues_(std::move(all_queues))
     , shutdown_flag_(shutdown_flag)
     , on_complete_(std::move(on_complete))
 {}
 
 void Worker::start() {
-    // TODO: launch thread_ running run()
     thread_ = std::thread(&Worker::run, this);
 }
 
 void Worker::join() {
-    // TODO: join thread_ if it's joinable
-    if(thread_.joinable()) {
+    if (thread_.joinable()) {
         thread_.join();
     }
 }
 
 void Worker::run() {
     while (true) {
-        if (shutdown_flag_.load(std::memory_order_relaxed) && queue_.size() == 0) {
+        bool all_empty = true;
+        for (WorkDeque* q : all_queues_) {
+            if (q->size() > 0) { all_empty = false; break; }
+        }
+        if (shutdown_flag_.load(std::memory_order_relaxed) && all_empty) {
             break;
         }
 
@@ -34,7 +38,19 @@ void Worker::run() {
             t.fn();
             on_complete_();
         } else {
-            std::this_thread::yield();
+            bool stolen = false;
+            for (WorkDeque* q : all_queues_) {
+                if (q == &queue_) continue;
+                if (q->steal(t)) {
+                    t.fn();
+                    on_complete_();
+                    stolen = true;
+                    break;
+                }
+            }
+            if (!stolen) {
+                std::this_thread::yield();
+            }
         }
     }
 }

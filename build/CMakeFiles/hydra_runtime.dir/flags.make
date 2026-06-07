@@ -6,7 +6,7 @@ CXX_DEFINES =
 
 CXX_INCLUDES = -I/Users/saahi/Desktop/dist-work-stealer/include
 
-CXX_FLAGSarm64 = -O2 -g -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wno-unused-parameter -O2 -g
+CXX_FLAGSarm64 = -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wno-unused-parameter -O3
 
-CXX_FLAGS = -O2 -g -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wno-unused-parameter -O2 -g
+CXX_FLAGS = -O3 -DNDEBUG -std=c++20 -arch arm64 -Wall -Wextra -Wpedantic -Wno-unused-parameter -O3
 

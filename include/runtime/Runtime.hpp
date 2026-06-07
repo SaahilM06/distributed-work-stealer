@@ -31,7 +31,9 @@ public:
     void on_task_complete();
 
 private:
-    WorkDeque                            queue_;
+    //WorkDeque                            queue_;
+    std::vector<std::unique_ptr<WorkDeque>> queues;
+
     Metrics                              metrics_;
     std::vector<std::unique_ptr<Worker>> workers_;
 
@@ -39,7 +41,7 @@ private:
     std::atomic<uint64_t> completed_{0};
     std::atomic<uint64_t> next_id_{1};
     std::atomic<bool>     shutdown_flag_{false};
-
+    std::atomic<int32_t> worker_num{0};
     std::mutex              cv_mutex_;
     std::condition_variable cv_;
 };

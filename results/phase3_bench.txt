@@ -1,0 +1,7 @@
+=== HydraRT Phase 1 Baseline Benchmark ===
+tasks=10000  work_iterations=1000
+
+workers=1   tasks=10000   work=1000   time=17.5 ms  throughput=570255 tasks/sec
+workers=2   tasks=10000   work=1000   time=8.2 ms  throughput=1212385 tasks/sec
+workers=4   tasks=10000   work=1000   time=4.2 ms  throughput=2385425 tasks/sec
+workers=8   tasks=10000   work=1000   time=4.2 ms  throughput=2387276 tasks/sec
