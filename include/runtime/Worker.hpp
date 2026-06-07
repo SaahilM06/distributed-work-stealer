@@ -18,6 +18,9 @@ public:
     void start();
     void join();
 
+    uint64_t steal_attempts() const { return steal_attempts_.load(std::memory_order_relaxed); }
+    uint64_t steal_successes() const { return steal_successes_.load(std::memory_order_relaxed); }
+
 private:
     void run();
 
@@ -27,4 +30,7 @@ private:
     std::atomic<bool>&     shutdown_flag_;
     std::function<void()>  on_complete_;
     std::thread            thread_;
+
+    std::atomic<uint64_t>  steal_attempts_{0};
+    std::atomic<uint64_t>  steal_successes_{0};
 };

@@ -34,6 +34,8 @@ static void run_bench(int num_workers, int num_tasks, int work_iterations) {
 
     std::printf("workers=%-2d  tasks=%-6d  work=%-5d  time=%.1f ms  throughput=%.0f tasks/sec\n",
                 num_workers, num_tasks, work_iterations, elapsed_ms, tasks_per_sec);
+    rt.print_steal_stats();
+    rt.dump_metrics("results/metrics.txt");
 }
 
 int main() {

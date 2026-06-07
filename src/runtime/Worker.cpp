@@ -41,7 +41,9 @@ void Worker::run() {
             bool stolen = false;
             for (WorkDeque* q : all_queues_) {
                 if (q == &queue_) continue;
+                steal_attempts_.fetch_add(1, std::memory_order_relaxed);
                 if (q->steal(t)) {
+                    steal_successes_.fetch_add(1, std::memory_order_relaxed);
                     t.fn();
                     on_complete_();
                     stolen = true;

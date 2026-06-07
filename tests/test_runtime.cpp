@@ -1,4 +1,5 @@
 #include "runtime/Runtime.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstdio>
@@ -6,6 +7,7 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <vector>
 
 // submit N tasks that each increment a counter, assert all completed
 static void test_basic_execution() {
@@ -101,11 +103,84 @@ static void test_distribution() {
     std::printf("PASS test_distribution\n\n");
 }
 
+// recursive merge sort using spawn() + futures
+static std::vector<int> merge_sort(Runtime& rt, std::vector<int> data) {
+    if (data.size() <= 64) {
+        std::sort(data.begin(), data.end());
+        return data;
+    }
+
+    int mid = data.size() / 2;
+    std::vector<int> left(data.begin(), data.begin() + mid);
+    std::vector<int> right(data.begin() + mid, data.end());
+
+    auto left_fut  = rt.spawn<std::vector<int>>([&rt, left]()  { return merge_sort(rt, left); });
+    auto right_fut = rt.spawn<std::vector<int>>([&rt, right]() { return merge_sort(rt, right); });
+
+    std::vector<int> sorted_left  = left_fut->get();
+    std::vector<int> sorted_right = right_fut->get();
+
+    std::vector<int> merged;
+    merged.reserve(data.size());
+    std::merge(sorted_left.begin(),  sorted_left.end(),
+               sorted_right.begin(), sorted_right.end(),
+               std::back_inserter(merged));
+    return merged;
+}
+
+static void test_merge_sort() {
+    constexpr int N = 1024;
+    std::vector<int> data(N);
+    for (int i = 0; i < N; ++i) data[i] = N - i;
+
+    Runtime rt(4);
+    std::vector<int> result = merge_sort(rt, data);
+    rt.wait_all();
+    rt.shutdown();
+
+    assert((int)result.size() == N);
+    assert(std::is_sorted(result.begin(), result.end()));
+    std::printf("PASS test_merge_sort: sorted %d elements\n", N);
+    rt.dump_metrics("results/metrics.txt");
+}
+
+// parallel fibonacci using spawn() + futures
+// base case at n <= 20 to avoid spawning thousands of tiny tasks
+static int fib(Runtime& rt, int n) {
+    if (n <= 20) {
+        if (n <= 1) return n;
+        return fib(rt, n - 1) + fib(rt, n - 2);
+    }
+
+    auto f1 = rt.spawn<int>([&rt, n]() { return fib(rt, n - 1); });
+    auto f2 = rt.spawn<int>([&rt, n]() { return fib(rt, n - 2); });
+
+    return f1->get() + f2->get();
+}
+
+static void test_fib() {
+    // known fibonacci values to assert against
+    // fib(30) = 832040
+    constexpr int N        = 30;
+    constexpr int EXPECTED = 832040;
+
+    Runtime rt(4);
+    int result = fib(rt, N);
+    rt.wait_all();
+    rt.shutdown();
+
+    assert(result == EXPECTED);
+    std::printf("PASS test_fib: fib(%d) = %d\n", N, result);
+    rt.dump_metrics("results/metrics.txt");
+}
+
 int main() {
     test_basic_execution();
     test_single_worker();
     test_two_batches();
     test_distribution();
+    test_merge_sort();
+    test_fib();
     std::printf("All tests passed.\n");
     return 0;
 }
