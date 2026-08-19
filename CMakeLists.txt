@@ -37,6 +37,7 @@ find_package(Threads REQUIRED)
 # Apps and tests link against this target.
 add_library(hydra_runtime STATIC
   src/runtime/WorkDeque.cpp
+  src/runtime/InjectionQueue.cpp
   src/runtime/Worker.cpp
   src/runtime/Runtime.cpp
   src/metrics/Metrics.cpp

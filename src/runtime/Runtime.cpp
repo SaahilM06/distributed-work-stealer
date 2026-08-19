@@ -3,24 +3,38 @@
 #include <cstdio>
 #include <fstream>
 
-Runtime::Runtime(int num_workers) {
+Runtime::Runtime(int num_workers, bool enable_tracing)
+    : metrics_(num_workers)
+{
+    metrics_.enable_tracing(enable_tracing);
+
     for (int i = 0; i < num_workers; ++i) {
         // Worker needs: its id, the shared queue, a shutdown flag, and a
         // callback to fire when it completes a task.
         // Worker never includes Runtime.hpp — this lambda is the only link back.
-        
-        queues.push_back(std::make_unique<WorkDeque>());        
+
+        queues.push_back(std::make_unique<WorkDeque>());
+        injection_queues_.push_back(std::make_unique<InjectionQueue>());
     }
     std::vector<WorkDeque*> all_queues;
     for (auto& q : queues) {
         all_queues.push_back(q.get());
+    }
+    std::vector<InjectionQueue*> all_injection;
+    for (auto& iq : injection_queues_) {
+        all_injection.push_back(iq.get());
     }
     for (int i = 0; i < num_workers; ++i) {
         workers_.push_back(std::make_unique<Worker>(
             i,
             *queues[i],
             all_queues,
+            *injection_queues_[i],
+            all_injection,
+            metrics_,
             shutdown_flag_,
+            submitted_,
+            completed_,
             [this]() { on_task_complete(); }
         ));
     }
@@ -42,8 +56,27 @@ void Runtime::submit(std::function<void()> fn) {
     // increment submitted BEFORE pushing so completed can never overtake it
     submitted_.fetch_add(1, std::memory_order_relaxed);
     metrics_.record_submitted();
-    int idx = worker_num.fetch_add(1, std::memory_order_relaxed) % static_cast<int>(queues.size());
-    queues[idx] -> push(std::move(t));
+
+    // Stamped before the push so queue wait covers the full time the task sat
+    // enqueued, including any time spent waiting to be stolen.
+    if (metrics_.tracing_enabled()) {
+        t.submit_ns = metrics_.now_ns();
+    }
+
+    // Chase-Lev's WorkDeque::push() is owner-only. If we're running on a worker
+    // thread (e.g. a recursive spawn() from inside a running task), push onto that
+    // worker's own local queue — safe, and better locality than round-robin. Anything
+    // submitted from outside a worker thread (main/test/bench code) has no queue it
+    // can safely own, so it round-robins across the injection queues instead — bulk
+    // external submission (e.g. a benchmark loop) still fans out N-way this way,
+    // rather than serializing through one shared queue.
+    if (t_current_queue != nullptr) {
+        t_current_queue->push(std::move(t));
+    } else {
+        uint32_t idx = injection_rr_.fetch_add(1, std::memory_order_relaxed) %
+                       static_cast<uint32_t>(injection_queues_.size());
+        injection_queues_[idx]->push(std::move(t));
+    }
 }
 
 void Runtime::wait_all() {
@@ -64,13 +97,42 @@ void Runtime::on_task_complete() {
     }
 }
 
+void Runtime::execute_helped(Task& t, bool stolen) {
+    if (metrics_.tracing_enabled()) {
+        uint64_t start = metrics_.now_ns();
+        t.fn();
+        uint64_t end = metrics_.now_ns();
+        metrics_.record_task(t.task_id, t.submit_ns, start, end, stolen);
+    } else {
+        t.fn();
+    }
+    on_task_complete();
+    helped_.fetch_add(1, std::memory_order_relaxed);
+}
+
 bool Runtime::try_execute_one(){
-    for(auto& q: queues) {
-        Task t;
-        if(q -> pop(t)) {
-            t.fn();
-            on_task_complete();
-            helped_.fetch_add(1, std::memory_order_relaxed);
+    // Called by a thread blocked in Future::get(), so it can help drain pending work
+    // instead of idling. WorkDeque::pop() is owner-only — only safe on the calling
+    // worker's own queue (if any) — everything else must go through steal() or the
+    // injection queue, both of which tolerate any caller thread.
+    Task t;
+
+    if (t_current_queue != nullptr && t_current_queue->pop(t)) {
+        execute_helped(t, /*stolen=*/false);
+        return true;
+    }
+
+    for (auto& iq : injection_queues_) {
+        if (iq->pop(t)) {
+            execute_helped(t, /*stolen=*/true);
+            return true;
+        }
+    }
+
+    for (auto& q : queues) {
+        if (q.get() == t_current_queue) continue;
+        if (q->steal(t)) {
+            execute_helped(t, /*stolen=*/true);
             return true;
         }
     }
@@ -95,6 +157,21 @@ void Runtime::dump_metrics(const std::string& path) const {
     std::fprintf(f, "steal_successes=%" PRIu64 "\n", total_steal_successes);
     std::fprintf(f, "steal_rate=%.1f%%\n",
         total_steal_attempts > 0 ? (total_steal_successes * 100.0 / total_steal_attempts) : 0.0);
+
+    LatencySummary lat = metrics_.summarize();
+    if (lat.total.count > 0) {
+        std::fprintf(f, "samples=%" PRIu64 "\n", lat.total.count);
+        // Latencies in microseconds; queue_wait is the scheduling-quality signal.
+        std::fprintf(f, "queue_wait_us p50=%.1f p95=%.1f p99=%.1f max=%.1f\n",
+            lat.queue_wait.p50 / 1000.0, lat.queue_wait.p95 / 1000.0,
+            lat.queue_wait.p99 / 1000.0, lat.queue_wait.max / 1000.0);
+        std::fprintf(f, "exec_us       p50=%.1f p95=%.1f p99=%.1f max=%.1f\n",
+            lat.exec.p50 / 1000.0, lat.exec.p95 / 1000.0,
+            lat.exec.p99 / 1000.0, lat.exec.max / 1000.0);
+        std::fprintf(f, "total_us      p50=%.1f p95=%.1f p99=%.1f max=%.1f\n",
+            lat.total.p50 / 1000.0, lat.total.p95 / 1000.0,
+            lat.total.p99 / 1000.0, lat.total.max / 1000.0);
+    }
     std::fprintf(f, "---\n");
     std::fclose(f);
 }

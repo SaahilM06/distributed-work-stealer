@@ -174,7 +174,88 @@ static void test_fib() {
     rt.dump_metrics("results/metrics.txt");
 }
 
+// compute_stats percentiles on a known distribution
+static void test_percentiles() {
+    std::vector<uint64_t> values;
+    for (uint64_t i = 1; i <= 100; ++i) values.push_back(i);
+
+    LatencyStats st = compute_stats(values);
+    assert(st.count == 100);
+    assert(st.min == 1);
+    assert(st.max == 100);
+    // nearest-rank: p50 of 1..100 is the 50th value
+    assert(st.p50 == 50);
+    assert(st.p95 == 95);
+    assert(st.p99 == 99);
+    assert(st.mean > 50.0 && st.mean < 51.0);
+
+    assert(compute_stats({}).count == 0);
+    std::printf("PASS test_percentiles\n");
+}
+
+// every executed task produces exactly one sample, with coherent timestamps
+static void test_metrics_sampling() {
+    constexpr int NUM_TASKS   = 400;
+    constexpr int SLEEP_US    = 200;
+
+    Runtime rt(4);
+    for (int i = 0; i < NUM_TASKS; ++i) {
+        rt.submit([SLEEP_US]() {
+            std::this_thread::sleep_for(std::chrono::microseconds(SLEEP_US));
+        });
+    }
+    rt.wait_all();
+    rt.shutdown();
+
+    std::vector<TaskSample> samples = rt.metrics().collect();
+    assert((int)samples.size() == NUM_TASKS);
+
+    for (const TaskSample& s : samples) {
+        assert(s.submit_ns > 0);
+        assert(s.start_ns >= s.submit_ns);   // can't start before being submitted
+        assert(s.end_ns   >= s.start_ns);    // can't end before starting
+        assert(s.total_ns() == s.queue_wait_ns() + s.exec_ns());
+    }
+
+    LatencySummary sum = rt.metrics().summarize();
+    assert(sum.total.count == (uint64_t)NUM_TASKS);
+    assert(sum.exec.p50 <= sum.exec.p95);
+    assert(sum.exec.p95 <= sum.exec.p99);
+    assert(sum.exec.p99 <= sum.exec.max);
+
+    // Each task sleeps SLEEP_US, so median execution time must be at least most of
+    // that (sleep_for only ever overshoots). Generous lower bound to stay robust on
+    // a loaded machine.
+    assert(sum.exec.p50 >= (uint64_t)SLEEP_US * 1000 / 2);
+    assert(sum.total.p50 >= sum.exec.p50);
+
+    std::printf("PASS test_metrics_sampling: %d samples, exec p50=%.1fus p99=%.1fus\n",
+                NUM_TASKS, sum.exec.p50 / 1000.0, sum.exec.p99 / 1000.0);
+}
+
+// tracing off means no samples, but the counters still work
+static void test_tracing_disabled() {
+    constexpr int NUM_TASKS = 200;
+    std::atomic<int> counter{0};
+
+    Runtime rt(4, /*enable_tracing=*/false);
+    for (int i = 0; i < NUM_TASKS; ++i) {
+        rt.submit([&counter]() { counter.fetch_add(1, std::memory_order_relaxed); });
+    }
+    rt.wait_all();
+    rt.shutdown();
+
+    assert(counter.load() == NUM_TASKS);
+    assert(rt.metrics().collect().empty());
+    assert(rt.metrics().submitted() == (uint64_t)NUM_TASKS);
+    assert(rt.metrics().completed() == (uint64_t)NUM_TASKS);
+    std::printf("PASS test_tracing_disabled: no samples, counters intact\n");
+}
+
 int main() {
+    test_percentiles();
+    test_metrics_sampling();
+    test_tracing_disabled();
     test_basic_execution();
     test_single_worker();
     test_two_batches();

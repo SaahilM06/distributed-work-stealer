@@ -5,6 +5,8 @@
 #include <thread>
 #include <vector>
 
+#include "metrics/Metrics.hpp"
+#include "runtime/InjectionQueue.hpp"
 #include "runtime/WorkDeque.hpp"
 
 class Worker {
@@ -12,7 +14,12 @@ public:
     Worker(int id,
            WorkDeque& queue,
            std::vector<WorkDeque*> all_queues,
+           InjectionQueue& own_injection,
+           std::vector<InjectionQueue*> all_injection,
+           Metrics& metrics,
            std::atomic<bool>& shutdown_flag,
+           const std::atomic<uint64_t>& submitted,
+           const std::atomic<uint64_t>& completed,
            std::function<void()> on_complete);
 
     void start();
@@ -24,10 +31,19 @@ public:
 private:
     void run();
 
+    // Time (when tracing is on), run, and account for one task. Every dispatch path in
+    // run() goes through here so timing can't drift between them.
+    void execute(Task& t, bool stolen);
+
     int                    id_;
     WorkDeque&             queue_;
     std::vector<WorkDeque*> all_queues_;
+    InjectionQueue&        own_injection_;
+    std::vector<InjectionQueue*> all_injection_;
+    Metrics&               metrics_;
     std::atomic<bool>&     shutdown_flag_;
+    const std::atomic<uint64_t>& submitted_;
+    const std::atomic<uint64_t>& completed_;
     std::function<void()>  on_complete_;
     std::thread            thread_;
 

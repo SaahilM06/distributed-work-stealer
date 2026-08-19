@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/InjectionQueue.hpp"
 #include "runtime/Task.hpp"
 #include "runtime/WorkDeque.hpp"
 #include "runtime/Worker.hpp"
@@ -17,7 +18,9 @@
 
 class Runtime {
 public:
-    explicit Runtime(int num_workers);
+    // enable_tracing turns on per-task latency sampling. Off gives a pure throughput
+    // measurement with no clock reads on the task path.
+    explicit Runtime(int num_workers, bool enable_tracing = true);
     ~Runtime();
 
     // wrap a callable into a Task and push it onto the global queue
@@ -50,9 +53,27 @@ public:
     void print_steal_stats() const;
     void dump_metrics(const std::string& path) const;
 
+    const Metrics& metrics() const { return metrics_; }
+    Metrics&       metrics()       { return metrics_; }
+
+    // Per-task latency rows for external analysis. Call after shutdown().
+    void dump_latency_csv(const std::string& path) const { metrics_.dump_csv(path); }
+
 private:
+    // Time, run, and account for a task executed by a thread helping out from inside
+    // Future::get() rather than by a worker's own dispatch loop.
+    void execute_helped(Task& t, bool stolen);
+
     //WorkDeque                            queue_;
-    std::vector<std::unique_ptr<WorkDeque>> queues;
+    std::vector<std::unique_ptr<WorkDeque>>       queues;
+
+    // One injection queue per worker so bulk external submission (e.g. a benchmark
+    // harness calling submit() in a loop from main) still fans out N-way instead of
+    // funneling through a single shared mutex. Round-robin on submit(); each worker
+    // checks its own slot first but any worker may drain any slot (all mutex-protected,
+    // safe for any caller) so work never gets stuck behind an idle owner.
+    std::vector<std::unique_ptr<InjectionQueue>> injection_queues_;
+    std::atomic<uint32_t>                        injection_rr_{0};
 
     Metrics                              metrics_;
     std::vector<std::unique_ptr<Worker>> workers_;
@@ -61,7 +82,6 @@ private:
     std::atomic<uint64_t> completed_{0};
     std::atomic<uint64_t> next_id_{1};
     std::atomic<bool>     shutdown_flag_{false};
-    std::atomic<int32_t> worker_num{0};
     std::atomic<uint64_t> spawned_{0};
     std::atomic<uint64_t> helped_{0};
     std::mutex              cv_mutex_;
