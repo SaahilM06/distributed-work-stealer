@@ -1,0 +1,47 @@
+=== HydraRT Phase 11: distributed inference engine — scheduling policy comparison ===
+requests=3000  reps=5  workers/node=2
+cluster: origin(cpu) + helper(gpu) + helper(cpu); inference stage is 8x faster on gpu
+
+policy          time_ms        req/s     p50_ms     p95_ms     p99_ms   stolen
+---------------------------------------------------------------------------------
+none              168.4        17812       99.0      156.9      163.7        0
+random            154.1        19467       84.8      141.6      147.9      856
+load-aware         81.2        36954       50.3       75.6       77.8     2929
+adaptive           82.2        36518       51.0       77.6       79.8     2762
+
+Best of 5 runs per policy. 'stolen' counts pipeline stages the origin handed
+to another node. Latency percentiles are end-to-end per request (all four stages).
+
+-------------------------------------------------------------------------------
+Analysis
+-------------------------------------------------------------------------------
+Against no stealing (static assignment):
+  throughput   17812 -> 36954 req/s   = 2.07x
+  p50 latency  99.0  -> 50.3 ms       = 49% lower
+  p99 latency  163.7 -> 77.8 ms       = 52% lower
+
+Against random-victim work stealing:
+  throughput   19467 -> 36954 req/s   = 1.90x
+  p99 latency  147.9 -> 77.8 ms       = 47% lower
+
+Load-aware and adaptive are tied (81.2 vs 82.2 ms, inside run-to-run variance).
+The capability affinity and tuned backoff in the adaptive policy did NOT beat plain
+load-awareness on this workload. Claiming otherwise would not be supported by the
+numbers: what actually matters here is knowing *who is busy*, not who is fastest.
+
+Two fixes were needed before any of this held, and both are worth recording because
+the first version of these policies lost to random stealing:
+
+1. Load information was arriving only on 300ms heartbeats. A run finishing in under
+   200ms therefore never saw a loaded peer, so load-aware stole nothing at all and
+   was no better than static. The fix was to piggyback the victim's live queue depth
+   on every steal response: an empty answer is still information, and it is fresh.
+
+2. The adaptive backoff was computed from a lifetime success rate, which made it
+   sticky — steals that failed during cluster startup suppressed stealing for the
+   rest of the run, long after work was plentiful. Rebasing it on *consecutive*
+   failures, reset by any success, fixed it.
+
+Before those fixes: random 154ms beat adaptive 187ms. After: both load-aware and
+adaptive land near 81ms while random is unchanged at 154ms. The lesson is that a
+scheduling policy is only as good as the freshness of what it is scheduling on.

@@ -1,0 +1,72 @@
+=== HydraRT Phase 6: Metrics & Tracing ===
+tasks=10000  work_iterations=1000  reps=5 (best of)
+
+--- uniform workload: throughput, tracing OFF vs ON ---
+workers=1   off=12.7 ms (784721 tasks/sec)   on=12.8 ms (778902 tasks/sec)   tracing cost=+0.7%
+workers=2   off=6.6 ms (1516070 tasks/sec)   on=6.8 ms (1464102 tasks/sec)   tracing cost=+3.5%
+workers=4   off=4.4 ms (2263489 tasks/sec)   on=5.0 ms (2016248 tasks/sec)   tracing cost=+12.3%
+workers=8   off=3.5 ms (2818887 tasks/sec)   on=3.9 ms (2593137 tasks/sec)   tracing cost=+8.7%
+(run-to-run variance is roughly +/-5%, so small negative tracing costs
+ are noise, not a speedup; the 4- and 8-worker figures are the signal.)
+
+--- uniform workload: latency detail (tracing ON) ---
+workers=1   tasks=10000   work=1000   time=14.2 ms  throughput=705675 tasks/sec  [traced]
+  [Metrics] submitted=10000  completed=10000
+    samples=10000  moved_between_workers=0 (0.0%)
+    per-worker: w0=10000
+    queue_wait  min=13.8  p50=7037.1  p95=12281.1  p99=12786.2  max=12909.3  mean=6960.6 (us)
+    exec        min=0.3  p50=1.2  p95=1.4  p99=2.5  max=128.2  mean=1.3 (us)
+    total       min=16.3  p50=7038.3  p95=12282.3  p99=12787.5  max=12910.6  mean=6962.0 (us)
+workers=4   tasks=10000   work=1000   time=20.1 ms  throughput=497643 tasks/sec  [traced]
+  [Metrics] submitted=10000  completed=10000
+    samples=10000  moved_between_workers=1448 (14.5%)
+    per-worker: w0=3443 w1=1840 w2=2697 w3=2020
+    queue_wait  min=1.2  p50=11150.5  p95=16180.9  p99=17642.9  max=18366.2  mean=11201.2 (us)
+    exec        min=0.3  p50=1.2  p95=2.5  p99=13.0  max=7821.1  mean=5.0 (us)
+    total       min=1.7  p50=11153.5  p95=16182.1  p99=17644.1  max=18367.4  mean=11206.2 (us)
+workers=8   tasks=10000   work=1000   time=7.4 ms  throughput=1351625 tasks/sec  [traced]
+  [Metrics] submitted=10000  completed=10000
+    samples=10000  moved_between_workers=4993 (49.9%)
+    per-worker: w0=147 w1=1722 w2=2837 w3=1199 w4=73 w5=200 w6=826 w7=2996
+    queue_wait  min=0.2  p50=903.9  p95=5884.8  p99=6474.9  max=6490.7  mean=1734.8 (us)
+    exec        min=0.3  p50=1.3  p95=1.9  p99=5.0  max=682.4  mean=1.7 (us)
+    total       min=1.2  p50=905.9  p95=5886.1  p99=6476.3  max=6491.9  mean=1736.5 (us)
+
+--- skewed workload (tail latency), tracing ON ---
+workers=1   tasks=10000   skewed(10% @ 20x)  time=55.3 ms  throughput=180803 tasks/sec
+  [Metrics] submitted=10000  completed=10000
+    samples=10000  moved_between_workers=0 (0.0%)
+    per-worker: w0=10000
+    queue_wait  min=5.8  p50=34765.3  p95=47368.0  p99=48878.4  max=49330.7  mean=31301.0 (us)
+    exec        min=0.3  p50=1.2  p95=12.5  p99=53.4  max=5360.0  mean=5.4 (us)
+    total       min=28.5  p50=34766.0  p95=47369.5  p99=48879.4  max=49332.5  mean=31306.4 (us)
+  worker 0: attempts=0  successes=0  rate=0.0%
+  total:    attempts=0  successes=0  rate=0.0%
+workers=4   tasks=10000   skewed(10% @ 20x)  time=32.1 ms  throughput=311549 tasks/sec
+  [Metrics] submitted=10000  completed=10000
+    samples=10000  moved_between_workers=1469 (14.7%)
+    per-worker: w0=2255 w1=3102 w2=1616 w3=3027
+    queue_wait  min=1.0  p50=5133.5  p95=21795.3  p99=29287.4  max=29628.0  mean=7917.3 (us)
+    exec        min=0.3  p50=1.2  p95=14.0  p99=115.7  max=7188.6  mean=11.7 (us)
+    total       min=16.7  p50=5137.7  p95=21803.2  p99=29304.0  max=29731.5  mean=7929.0 (us)
+  worker 0: attempts=36  successes=0  rate=0.0%
+  worker 1: attempts=6  successes=0  rate=0.0%
+  worker 2: attempts=9  successes=0  rate=0.0%
+  worker 3: attempts=3  successes=0  rate=0.0%
+  total:    attempts=54  successes=0  rate=0.0%
+workers=8   tasks=10000   skewed(10% @ 20x)  time=14.8 ms  throughput=674169 tasks/sec
+  [Metrics] submitted=10000  completed=10000
+    samples=10000  moved_between_workers=3318 (33.2%)
+    per-worker: w0=604 w1=1829 w2=944 w3=1613 w4=362 w5=1522 w6=1330 w7=1796
+    queue_wait  min=0.4  p50=2045.3  p95=10594.4  p99=10654.5  max=10749.0  mean=4417.5 (us)
+    exec        min=0.3  p50=1.3  p95=13.0  p99=80.2  max=8015.6  mean=8.0 (us)
+    total       min=3.0  p50=2049.8  p95=10599.7  p99=10658.4  max=11538.5  mean=4425.5 (us)
+  worker 0: attempts=35  successes=0  rate=0.0%
+  worker 1: attempts=42  successes=0  rate=0.0%
+  worker 2: attempts=21  successes=0  rate=0.0%
+  worker 3: attempts=21  successes=0  rate=0.0%
+  worker 4: attempts=21  successes=0  rate=0.0%
+  worker 5: attempts=14  successes=0  rate=0.0%
+  worker 6: attempts=14  successes=0  rate=0.0%
+  worker 7: attempts=7  successes=0  rate=0.0%
+  total:    attempts=175  successes=0  rate=0.0%

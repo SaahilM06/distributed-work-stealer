@@ -1,0 +1,22 @@
+=== HydraRT Phase 5 Benchmark: Chase-Lev lock-free per-worker deque + injection queues ===
+Compare against results/phase3_bench.txt (mutex-based WorkDeque, round-robin submission).
+phase3 baseline: workers=4 -> 2,385,425 tasks/sec ; workers=8 -> 2,387,276 tasks/sec (plateau, no gain from 4->8)
+
+--- run 1 ---
+workers=1   tasks=10000   work=1000   time=20.1 ms  throughput=497917 tasks/sec
+workers=2   tasks=10000   work=1000   time=11.0 ms  throughput=906560 tasks/sec
+workers=4   tasks=10000   work=1000   time=5.5 ms  throughput=1804511 tasks/sec
+workers=8   tasks=10000   work=1000   time=4.2 ms  throughput=2369949 tasks/sec
+
+--- run 2 ---
+workers=1   tasks=10000   work=1000   time=21.1 ms  throughput=474794 tasks/sec
+workers=2   tasks=10000   work=1000   time=10.9 ms  throughput=913590 tasks/sec
+workers=4   tasks=10000   work=1000   time=5.5 ms  throughput=1806603 tasks/sec
+workers=8   tasks=10000   work=1000   time=4.2 ms  throughput=2385401 tasks/sec
+
+--- run 3 ---
+workers=1   tasks=10000   work=1000   time=19.4 ms  throughput=516765 tasks/sec
+workers=2   tasks=10000   work=1000   time=10.9 ms  throughput=914770 tasks/sec
+workers=4   tasks=10000   work=1000   time=5.6 ms  throughput=1772919 tasks/sec
+workers=8   tasks=10000   work=1000   time=4.2 ms  throughput=2362763 tasks/sec
+

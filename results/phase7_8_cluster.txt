@@ -1,0 +1,53 @@
+=== HydraRT Phase 7+8: TCP node runtime, coordinator, remote work stealing ===
+
+Hardware: Apple M2, 8 logical cores. All nodes are separate processes on loopback,
+so they share those same 8 cores — no extra compute is added by adding nodes.
+
+Workload: 4000 portable SyntheticCompute tasks (200k iterations each).
+Node 3 submits everything; nodes 1 and 2 start empty and can only obtain work by
+stealing it over TCP. Timing is the submitting node's wall clock to wait_all().
+
+-------------------------------------------------------------------------------
+Control: one node, 8 workers, no cluster (uses all 8 cores via shared memory)
+-------------------------------------------------------------------------------
+  rep 1: 209.4 ms
+  rep 2: 231.6 ms
+  rep 3: 167.0 ms
+  median: 209.4 ms   <- best achievable on this machine
+
+-------------------------------------------------------------------------------
+A: 3 nodes x 2 workers  (origin can use only 2 of 8 cores on its own)
+-------------------------------------------------------------------------------
+  rep 1: off=581.4 ms  on=376.4 ms  speedup=1.54x  moved=1505/4000
+  rep 2: off=729.2 ms  on=310.8 ms  speedup=2.34x  moved=1276/4000
+  rep 3: off=656.3 ms  on=334.9 ms  speedup=1.95x  moved=1459/4000
+  rep 4: off=435.5 ms  on=269.2 ms  speedup=1.61x  moved=1086/4000
+  rep 5: off=526.5 ms  on=379.8 ms  speedup=1.38x  moved=1526/4000
+  median: off=581.4 ms  on=334.9 ms  speedup=1.73x
+
+-------------------------------------------------------------------------------
+B: 3 nodes x 4 workers  (origin can use only 4 of 8 cores on its own)
+-------------------------------------------------------------------------------
+  rep 1: off=362.4 ms  on=267.2 ms  speedup=1.35x  moved=1344/4000
+  rep 2: off=341.0 ms  on=250.5 ms  speedup=1.36x  moved=1328/4000
+  rep 3: off=319.2 ms  on=212.7 ms  speedup=1.50x  moved=992/4000
+  rep 4: off=241.8 ms  on=262.4 ms  speedup=.92x  moved=1494/4000
+  rep 5: off=396.0 ms  on=231.2 ms  speedup=1.71x  moved=1056/4000
+  median: off=341.0 ms  on=250.5 ms  speedup=1.36x
+
+-------------------------------------------------------------------------------
+Reading
+-------------------------------------------------------------------------------
+Remote stealing wins whenever the origin node cannot use the cluster's full
+capacity by itself, which is the case in both A and B: its workers occupy only
+2 or 4 of the machine's 8 cores, and stealing lets peer processes take up the
+rest. The speedup is larger in A because the origin starts more starved.
+
+The B 'on' figure is the more informative one: it lands close to the single-node
+8-worker control, i.e. the cluster recovers most of what shared memory would give
+for the same cores. The remaining gap is serialization plus a TCP round trip per
+steal batch, which is the price of being able to span machines at all.
+
+Run-to-run variance is high (M2 mixes 4 performance and 4 efficiency cores, and
+12 threads contend for 8 of them), so medians over 5 reps are reported rather
+than single runs.
