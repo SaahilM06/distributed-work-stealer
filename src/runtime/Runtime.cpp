@@ -1,4 +1,5 @@
 #include "runtime/Runtime.hpp"
+#include "runtime/TaskRegistry.hpp"
 #include <cinttypes>
 #include <cstdio>
 #include <fstream>
@@ -25,18 +26,18 @@ Runtime::Runtime(int num_workers, bool enable_tracing)
         all_injection.push_back(iq.get());
     }
     for (int i = 0; i < num_workers; ++i) {
+        WorkerContext ctx;
+        ctx.all_queues    = all_queues;
+        ctx.all_injection = all_injection;
+        ctx.remote_pool   = &remote_pool_;
+        ctx.metrics       = &metrics_;
+        ctx.shutdown_flag = &shutdown_flag_;
+        ctx.submitted     = &submitted_;
+        ctx.completed     = &completed_;
+        ctx.on_complete   = [this]() { on_task_complete(); };
+
         workers_.push_back(std::make_unique<Worker>(
-            i,
-            *queues[i],
-            all_queues,
-            *injection_queues_[i],
-            all_injection,
-            metrics_,
-            shutdown_flag_,
-            submitted_,
-            completed_,
-            [this]() { on_task_complete(); }
-        ));
+            i, *queues[i], *injection_queues_[i], std::move(ctx)));
     }
 
     for (auto& w : workers_) {
@@ -79,6 +80,33 @@ void Runtime::submit(std::function<void()> fn) {
     }
 }
 
+void Runtime::submit_portable(TaskType type, std::vector<uint8_t> payload, uint32_t cost_hint) {
+    Task t;
+    t.task_id     = next_id_++;
+    t.type        = type;
+    t.payload     = std::move(payload);
+    t.cost_hint   = cost_hint;
+    t.origin_node = node_id_.load(std::memory_order_relaxed);
+
+    submitted_.fetch_add(1, std::memory_order_relaxed);
+    metrics_.record_submitted();
+    if (metrics_.tracing_enabled()) {
+        t.submit_ns = metrics_.now_ns();
+    }
+
+    remote_pool_.push(std::move(t));
+}
+
+bool Runtime::take_portable(Task& out) {
+    return remote_pool_.pop(out);
+}
+
+void Runtime::on_remote_task_complete() {
+    // The origin counted this task as submitted, so it must count it as completed —
+    // but not as locally executed, since another node did the work.
+    finish_one();
+}
+
 void Runtime::wait_all() {
     std::unique_lock<std::mutex> lock(cv_mutex_);
     cv_.wait(lock, [this]() {
@@ -89,6 +117,11 @@ void Runtime::wait_all() {
 }
 
 void Runtime::on_task_complete() {
+    local_executed_.fetch_add(1, std::memory_order_relaxed);
+    finish_one();
+}
+
+void Runtime::finish_one() {
     metrics_.record_completed();
     uint64_t done = completed_.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -100,11 +133,11 @@ void Runtime::on_task_complete() {
 void Runtime::execute_helped(Task& t, bool stolen) {
     if (metrics_.tracing_enabled()) {
         uint64_t start = metrics_.now_ns();
-        t.fn();
+        run_task(t);
         uint64_t end = metrics_.now_ns();
         metrics_.record_task(t.task_id, t.submit_ns, start, end, stolen);
     } else {
-        t.fn();
+        run_task(t);
     }
     on_task_complete();
     helped_.fetch_add(1, std::memory_order_relaxed);
@@ -127,6 +160,11 @@ bool Runtime::try_execute_one(){
             execute_helped(t, /*stolen=*/true);
             return true;
         }
+    }
+
+    if (remote_pool_.pop(t)) {
+        execute_helped(t, /*stolen=*/false);
+        return true;
     }
 
     for (auto& q : queues) {

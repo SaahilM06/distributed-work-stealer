@@ -26,6 +26,29 @@ public:
     // wrap a callable into a Task and push it onto the global queue
     void submit(std::function<void()> fn);
 
+    // Submit a task in portable form (type tag + payload) so it can be executed here
+    // or stolen by another node. Requires a handler registered for `type`.
+    void submit_portable(TaskType type, std::vector<uint8_t> payload, uint32_t cost_hint = 1);
+
+    // Hand a portable task to a remote thief. Returns false if none is available.
+    // The task stays counted as submitted here; the thief reports its completion back.
+    bool take_portable(Task& out);
+
+    // How many portable tasks are currently available to steal.
+    std::size_t portable_available() const { return remote_pool_.size(); }
+
+    // Called when a node reports that a task it stole from us has finished.
+    void on_remote_task_complete();
+
+    // Identifies this Runtime's node so stolen tasks know where to report completion.
+    void     set_node_id(uint32_t id) { node_id_ = id; }
+    uint32_t node_id() const          { return node_id_; }
+
+    uint64_t pending() const {
+        return submitted_.load(std::memory_order_relaxed) -
+               completed_.load(std::memory_order_relaxed);
+    }
+
     // try to pop and execute one task from any queue — returns true if a task was executed
     bool try_execute_one();
 
@@ -50,6 +73,13 @@ public:
     // called by each worker after it finishes executing a task
     void on_task_complete();
 
+    // Tasks actually executed by this Runtime's own workers. Distinct from
+    // metrics().completed(), which also counts tasks this node handed to a remote
+    // thief — summing that across nodes would count stolen tasks twice.
+    uint64_t local_executed() const {
+        return local_executed_.load(std::memory_order_relaxed);
+    }
+
     void print_steal_stats() const;
     void dump_metrics(const std::string& path) const;
 
@@ -64,6 +94,9 @@ private:
     // Future::get() rather than by a worker's own dispatch loop.
     void execute_helped(Task& t, bool stolen);
 
+    // Shared completion accounting for both locally and remotely executed tasks.
+    void finish_one();
+
     //WorkDeque                            queue_;
     std::vector<std::unique_ptr<WorkDeque>>       queues;
 
@@ -75,6 +108,13 @@ private:
     std::vector<std::unique_ptr<InjectionQueue>> injection_queues_;
     std::atomic<uint32_t>                        injection_rr_{0};
 
+    // Portable tasks: runnable by local workers, stealable by remote nodes. Kept
+    // separate from the per-worker Chase-Lev deques because a remote steal is served
+    // by a network thread, and Chase-Lev pop() is owner-only — a network thread must
+    // never touch a worker's deque.
+    InjectionQueue        remote_pool_;
+    std::atomic<uint32_t> node_id_{0};
+
     Metrics                              metrics_;
     std::vector<std::unique_ptr<Worker>> workers_;
 
@@ -83,6 +123,7 @@ private:
     std::atomic<uint64_t> next_id_{1};
     std::atomic<bool>     shutdown_flag_{false};
     std::atomic<uint64_t> spawned_{0};
+    std::atomic<uint64_t> local_executed_{0};
     std::atomic<uint64_t> helped_{0};
     std::mutex              cv_mutex_;
     std::condition_variable cv_;

@@ -16,6 +16,8 @@ build-debug:
 test: build-debug
 	./build-debug/test_deque
 	./build-debug/test_runtime
+	./build-debug/test_protocol
+	./build-debug/test_cluster
 
 bench: build
 	./build/hydra_bench

@@ -1,6 +1,6 @@
 #include "runtime/WorkDeque.hpp"
 #include <atomic>
-#include <cassert>
+#include "Check.hpp"
 #include <cstdio>
 #include <thread>
 #include <vector>
@@ -14,19 +14,19 @@ static void test_push_pop() {
 
     q.push(t1);
     q.push(t2);
-    assert(q.size() == 2);
+    CHECK(q.size() == 2);
 
     Task out;
-    assert(q.pop(out) && out.task_id == 2);
-    assert(q.pop(out) && out.task_id == 1);
-    assert(q.size() == 0);
+    CHECK(q.pop(out) && out.task_id == 2);
+    CHECK(q.pop(out) && out.task_id == 1);
+    CHECK(q.size() == 0);
     std::printf("PASS test_push_pop\n");
 }
 
 static void test_pop_empty() {
     WorkDeque q;
     Task out;
-    assert(!q.pop(out));
+    CHECK(!q.pop(out));
     std::printf("PASS test_pop_empty\n");
 }
 
@@ -39,10 +39,10 @@ static void test_steal_order() {
     }
 
     Task out;
-    assert(q.steal(out) && out.task_id == 1);
-    assert(q.steal(out) && out.task_id == 2);
-    assert(q.steal(out) && out.task_id == 3);
-    assert(!q.steal(out));
+    CHECK(q.steal(out) && out.task_id == 1);
+    CHECK(q.steal(out) && out.task_id == 2);
+    CHECK(q.steal(out) && out.task_id == 3);
+    CHECK(!q.steal(out));
     std::printf("PASS test_steal_order\n");
 }
 
@@ -55,17 +55,17 @@ static void test_growth() {
         Task t; t.task_id = i;
         q.push(t);
     }
-    assert(q.size() == (std::size_t)N);
+    CHECK(q.size() == (std::size_t)N);
 
     std::vector<bool> seen(N, false);
     Task out;
     int count = 0;
     while (q.pop(out)) {
-        assert(!seen[out.task_id]);
+        CHECK(!seen[out.task_id]);
         seen[out.task_id] = true;
         ++count;
     }
-    assert(count == N);
+    CHECK(count == N);
     std::printf("PASS test_growth: %d tasks survived grow()\n", N);
 }
 
@@ -124,10 +124,10 @@ static void test_concurrent_owner_and_thieves() {
 
     for (auto& th : thieves) th.join();
 
-    assert(!out_of_range.load());
-    assert(!duplicate.load());
-    assert(collected.load() == N);
-    assert(q.size() == 0);
+    CHECK(!out_of_range.load());
+    CHECK(!duplicate.load());
+    CHECK(collected.load() == N);
+    CHECK(q.size() == 0);
     std::printf("PASS test_concurrent_owner_and_thieves: %d tasks, no duplicates/losses\n", N);
 }
 

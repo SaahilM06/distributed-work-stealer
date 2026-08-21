@@ -26,8 +26,8 @@ Scope decisions:
 - [x] Phase 4 — Fork-join + Futures (`spawn`/`Future<T>`)
 - [x] Phase 5 — Chase-Lev lock-free deque
 - [x] Phase 6 — Metrics + tracing (p50/p95/p99, CSV)
-- [ ] Phase 7 — TCP node runtime + coordinator
-- [ ] Phase 8 — Remote work stealing
+- [x] Phase 7 — TCP node runtime + coordinator
+- [x] Phase 8 — Remote work stealing
 - [ ] Phase 9 — Adaptive scheduler
 - [ ] Phase 10 — Fault tolerance (node death, task retry)
 - [ ] Phase 11 — ML Inference Engine (capstone)
@@ -51,14 +51,33 @@ recording never contends, mirroring the per-worker deque design. Tracing is togg
 (`Runtime rt(n, /*enable_tracing=*/false)`) and costs ~3-10% throughput when on.
 See `results/phase6_bench.txt` and `results/phase6_latency_*.csv`.
 
-**Phase 7 — TCP node runtime + coordinator.** A "node" process wraps a `Runtime` with a
-TCP server; a lightweight coordinator handles membership/heartbeats. Requires a
-serializable task representation, since `Task::fn` (`std::function<void()>`) can't cross
-the wire.
+**Phase 7 — TCP node runtime + coordinator.** Done. A `Task` is now dual-mode: a
+`std::function` closure (fast, local-only) *or* a `TaskType` tag plus a byte payload,
+which is the only form that can cross the network — a closure captures pointers into one
+process's memory and `std::function` is type-erased code that cannot be serialized. Every
+node registers an identical handler table (`TaskRegistry`) mapping tag to code, so the
+wire only carries tag + bytes. Around that: explicit little-endian encoding
+(`net/Serialize.hpp`), length-prefixed framing over TCP (`net/Protocol.hpp` — a stream has
+no message boundaries), a blocking socket wrapper (`net/Socket.hpp`), and a `Coordinator`
+handling registration and heartbeats. Membership is request/response only: a node
+heartbeats and gets the current node list back, so nothing is ever pushed and a missed
+update is picked up on the next beat. Binaries: `hydra_coordinator`, `hydra_node`.
 
-**Phase 8 — Remote work stealing.** Idle nodes steal from peer queue depth over the
-Phase 7 TCP link — this is what makes "Node 1: GPU / Node 3: CPU" literal separate
-machines rather than an in-process simulation.
+**Phase 8 — Remote work stealing.** Done. A node whose queue is below its worker count
+picks a random peer and asks for work; the victim gives away half of its portable pool,
+capped by what was requested (one task per round trip never moves enough load to pay for
+the trip). Worker threads never touch the network — a dedicated steal thread pulls work
+and a completion thread reports finished tasks home, because a blocking socket call on a
+worker would stall that worker's whole share of the machine. Tasks handed out stay counted
+as submitted at the origin until the thief reports completion, so `wait_all()` remains
+correct across nodes.
+
+Measured (`results/phase7_8_cluster.txt`, medians of 5 reps, 3 node processes on one
+8-core M2): **1.73x** speedup with 2 workers/node and **1.36x** with 4 workers/node, with
+25-38% of tasks crossing the network. Stealing helps whenever the origin node cannot use
+the machine's full capacity alone; the stealing-on result lands close to a single-node
+8-worker control, so the cluster recovers most of what shared memory would give for the
+same cores, minus serialization and a TCP round trip per steal batch.
 
 **Phase 9 — Adaptive scheduler.** Nodes report a capability profile (measured
 per-`TaskType` throughput, or a configured GPU/CPU tag) alongside queue depth, steal

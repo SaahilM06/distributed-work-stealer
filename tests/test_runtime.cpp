@@ -1,7 +1,7 @@
 #include "runtime/Runtime.hpp"
 #include <algorithm>
 #include <atomic>
-#include <cassert>
+#include "Check.hpp"
 #include <cstdio>
 #include <map>
 #include <mutex>
@@ -23,7 +23,7 @@ static void test_basic_execution() {
     rt.wait_all();
     rt.shutdown();
 
-    assert(counter.load() == NUM_TASKS);
+    CHECK(counter.load() == NUM_TASKS);
     std::printf("PASS test_basic_execution: %d/%d tasks completed\n", counter.load(), NUM_TASKS);
 }
 
@@ -41,7 +41,7 @@ static void test_single_worker() {
     rt.wait_all();
     rt.shutdown();
 
-    assert(counter.load() == NUM_TASKS);
+    CHECK(counter.load() == NUM_TASKS);
     std::printf("PASS test_single_worker: %d/%d tasks completed\n", counter.load(), NUM_TASKS);
 }
 
@@ -57,7 +57,7 @@ static void test_two_batches() {
         });
     }
     rt.wait_all();
-    assert(counter.load() == 500);
+    CHECK(counter.load() == 500);
 
     for (int i = 0; i < 500; ++i) {
         rt.submit([&counter]() {
@@ -67,7 +67,7 @@ static void test_two_batches() {
     rt.wait_all();
     rt.shutdown();
 
-    assert(counter.load() == 1000);
+    CHECK(counter.load() == 1000);
     std::printf("PASS test_two_batches: counter=%d\n", counter.load());
 }
 
@@ -99,7 +99,7 @@ static void test_distribution() {
     }
     std::printf("  total threads used: %zu\n", task_counts.size());
 
-    assert(task_counts.size() > 1);
+    CHECK(task_counts.size() > 1);
     std::printf("PASS test_distribution\n\n");
 }
 
@@ -138,8 +138,8 @@ static void test_merge_sort() {
     rt.wait_all();
     rt.shutdown();
 
-    assert((int)result.size() == N);
-    assert(std::is_sorted(result.begin(), result.end()));
+    CHECK((int)result.size() == N);
+    CHECK(std::is_sorted(result.begin(), result.end()));
     std::printf("PASS test_merge_sort: sorted %d elements\n", N);
     rt.dump_metrics("results/metrics.txt");
 }
@@ -169,7 +169,7 @@ static void test_fib() {
     rt.wait_all();
     rt.shutdown();
 
-    assert(result == EXPECTED);
+    CHECK(result == EXPECTED);
     std::printf("PASS test_fib: fib(%d) = %d\n", N, result);
     rt.dump_metrics("results/metrics.txt");
 }
@@ -180,16 +180,16 @@ static void test_percentiles() {
     for (uint64_t i = 1; i <= 100; ++i) values.push_back(i);
 
     LatencyStats st = compute_stats(values);
-    assert(st.count == 100);
-    assert(st.min == 1);
-    assert(st.max == 100);
+    CHECK(st.count == 100);
+    CHECK(st.min == 1);
+    CHECK(st.max == 100);
     // nearest-rank: p50 of 1..100 is the 50th value
-    assert(st.p50 == 50);
-    assert(st.p95 == 95);
-    assert(st.p99 == 99);
-    assert(st.mean > 50.0 && st.mean < 51.0);
+    CHECK(st.p50 == 50);
+    CHECK(st.p95 == 95);
+    CHECK(st.p99 == 99);
+    CHECK(st.mean > 50.0 && st.mean < 51.0);
 
-    assert(compute_stats({}).count == 0);
+    CHECK(compute_stats({}).count == 0);
     std::printf("PASS test_percentiles\n");
 }
 
@@ -208,26 +208,26 @@ static void test_metrics_sampling() {
     rt.shutdown();
 
     std::vector<TaskSample> samples = rt.metrics().collect();
-    assert((int)samples.size() == NUM_TASKS);
+    CHECK((int)samples.size() == NUM_TASKS);
 
     for (const TaskSample& s : samples) {
-        assert(s.submit_ns > 0);
-        assert(s.start_ns >= s.submit_ns);   // can't start before being submitted
-        assert(s.end_ns   >= s.start_ns);    // can't end before starting
-        assert(s.total_ns() == s.queue_wait_ns() + s.exec_ns());
+        CHECK(s.submit_ns > 0);
+        CHECK(s.start_ns >= s.submit_ns);   // can't start before being submitted
+        CHECK(s.end_ns   >= s.start_ns);    // can't end before starting
+        CHECK(s.total_ns() == s.queue_wait_ns() + s.exec_ns());
     }
 
     LatencySummary sum = rt.metrics().summarize();
-    assert(sum.total.count == (uint64_t)NUM_TASKS);
-    assert(sum.exec.p50 <= sum.exec.p95);
-    assert(sum.exec.p95 <= sum.exec.p99);
-    assert(sum.exec.p99 <= sum.exec.max);
+    CHECK(sum.total.count == (uint64_t)NUM_TASKS);
+    CHECK(sum.exec.p50 <= sum.exec.p95);
+    CHECK(sum.exec.p95 <= sum.exec.p99);
+    CHECK(sum.exec.p99 <= sum.exec.max);
 
     // Each task sleeps SLEEP_US, so median execution time must be at least most of
     // that (sleep_for only ever overshoots). Generous lower bound to stay robust on
     // a loaded machine.
-    assert(sum.exec.p50 >= (uint64_t)SLEEP_US * 1000 / 2);
-    assert(sum.total.p50 >= sum.exec.p50);
+    CHECK(sum.exec.p50 >= (uint64_t)SLEEP_US * 1000 / 2);
+    CHECK(sum.total.p50 >= sum.exec.p50);
 
     std::printf("PASS test_metrics_sampling: %d samples, exec p50=%.1fus p99=%.1fus\n",
                 NUM_TASKS, sum.exec.p50 / 1000.0, sum.exec.p99 / 1000.0);
@@ -245,10 +245,10 @@ static void test_tracing_disabled() {
     rt.wait_all();
     rt.shutdown();
 
-    assert(counter.load() == NUM_TASKS);
-    assert(rt.metrics().collect().empty());
-    assert(rt.metrics().submitted() == (uint64_t)NUM_TASKS);
-    assert(rt.metrics().completed() == (uint64_t)NUM_TASKS);
+    CHECK(counter.load() == NUM_TASKS);
+    CHECK(rt.metrics().collect().empty());
+    CHECK(rt.metrics().submitted() == (uint64_t)NUM_TASKS);
+    CHECK(rt.metrics().completed() == (uint64_t)NUM_TASKS);
     std::printf("PASS test_tracing_disabled: no samples, counters intact\n");
 }
 
