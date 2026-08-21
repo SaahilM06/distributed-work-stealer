@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -30,15 +31,34 @@ public:
     // or stolen by another node. Requires a handler registered for `type`.
     void submit_portable(TaskType type, std::vector<uint8_t> payload, uint32_t cost_hint = 1);
 
+    // Submit an already-formed Task to this node's local queues. Used to re-run a task
+    // recovered from a failed peer: the task keeps its payload (so a pipeline observer
+    // can still advance the chain) but carries an `fn`, which makes it non-portable and
+    // therefore not stealable again by the peer that just dropped it.
+    void submit_task(Task t);
+
     // Hand a portable task to a remote thief. Returns false if none is available.
     // The task stays counted as submitted here; the thief reports its completion back.
-    bool take_portable(Task& out);
+    //
+    // `preferred` biases which kind of work is given away: a thief that is fast at one
+    // task type gets that type first, falling back to anything else. Pass
+    // TaskType::Count for no preference.
+    bool take_portable(Task& out, TaskType preferred = TaskType::Count);
 
     // How many portable tasks are currently available to steal.
-    std::size_t portable_available() const { return remote_pool_.size(); }
+    std::size_t portable_available() const;
 
-    // Called when a node reports that a task it stole from us has finished.
-    void on_remote_task_complete();
+    // Called when a node reports that a task it stole from us has finished. `t` is the
+    // task as it was handed out, so a pipeline can advance to its next stage even
+    // though this node never ran it.
+    void on_remote_task_complete(const Task& t);
+
+    // Invoked after every task finishes, with the task itself, before the task is
+    // counted as complete. A multi-stage job uses this to submit its next stage.
+    // Set once before the runtime starts taking work.
+    void set_task_observer(std::function<void(const Task&)> fn) {
+        task_observer_ = std::move(fn);
+    }
 
     // Identifies this Runtime's node so stolen tasks know where to report completion.
     void     set_node_id(uint32_t id) { node_id_ = id; }
@@ -71,7 +91,7 @@ public:
     void shutdown();
 
     // called by each worker after it finishes executing a task
-    void on_task_complete();
+    void on_task_complete(const Task& t);
 
     // Tasks actually executed by this Runtime's own workers. Distinct from
     // metrics().completed(), which also counts tasks this node handed to a remote
@@ -112,7 +132,13 @@ private:
     // separate from the per-worker Chase-Lev deques because a remote steal is served
     // by a network thread, and Chase-Lev pop() is owner-only — a network thread must
     // never touch a worker's deque.
-    InjectionQueue        remote_pool_;
+    //
+    // One pool per task type so a steal can select by capability without scanning:
+    // "give me inference work" is an O(1) lookup rather than a search through a
+    // single mixed queue.
+    std::array<std::unique_ptr<InjectionQueue>, static_cast<std::size_t>(TaskType::Count)>
+                          remote_pools_;
+    std::atomic<uint32_t> remote_rr_{0};
     std::atomic<uint32_t> node_id_{0};
 
     Metrics                              metrics_;
@@ -125,6 +151,7 @@ private:
     std::atomic<uint64_t> spawned_{0};
     std::atomic<uint64_t> local_executed_{0};
     std::atomic<uint64_t> helped_{0};
+    std::function<void(const Task&)> task_observer_;
     std::mutex              cv_mutex_;
     std::condition_variable cv_;
 };

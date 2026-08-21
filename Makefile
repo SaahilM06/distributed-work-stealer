@@ -18,6 +18,7 @@ test: build-debug
 	./build-debug/test_runtime
 	./build-debug/test_protocol
 	./build-debug/test_cluster
+	./build-debug/test_inference
 
 bench: build
 	./build/hydra_bench

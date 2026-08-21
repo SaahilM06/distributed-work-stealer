@@ -39,6 +39,11 @@ public:
     bool send_all(const void* data, std::size_t n);
     bool recv_all(void* data, std::size_t n);
 
+    // Single read of up to `n` bytes. Returns bytes read, 0 on clean close, -1 on
+    // error. For protocols like HTTP where the length isn't known until the data has
+    // been parsed, so recv_all() cannot be used.
+    long recv_some(void* data, std::size_t n);
+
     bool send_msg(proto::MsgType type, const std::vector<uint8_t>& payload);
     bool recv_msg(proto::MsgType& out_type, std::vector<uint8_t>& out_payload);
 

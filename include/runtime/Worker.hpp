@@ -16,14 +16,19 @@ struct WorkerContext {
     std::vector<WorkDeque*>      all_queues;
     std::vector<InjectionQueue*> all_injection;
 
-    // Portable tasks that any local worker may run and any remote node may steal.
-    InjectionQueue* remote_pool = nullptr;
+    // Portable tasks that any local worker may run and any remote node may steal,
+    // one pool per task type.
+    std::vector<InjectionQueue*> remote_pools;
 
     Metrics*                     metrics       = nullptr;
     std::atomic<bool>*           shutdown_flag = nullptr;
     const std::atomic<uint64_t>* submitted     = nullptr;
     const std::atomic<uint64_t>* completed     = nullptr;
-    std::function<void()>        on_complete;
+    // Receives the task that just finished. Passing the task (rather than a bare
+    // notification) is what lets a multi-stage pipeline submit its next stage — and
+    // Runtime submits that next stage BEFORE counting this one complete, so
+    // wait_all() can never see a momentarily balanced ledger and return early.
+    std::function<void(const Task&)> on_complete;
 };
 
 class Worker {

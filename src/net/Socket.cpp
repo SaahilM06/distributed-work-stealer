@@ -165,6 +165,16 @@ bool TcpSocket::recv_all(void* data, std::size_t n) {
     return true;
 }
 
+long TcpSocket::recv_some(void* data, std::size_t n) {
+    int fd = fd_.load(std::memory_order_acquire);
+    if (fd < 0) return -1;
+    for (;;) {
+        ssize_t k = ::recv(fd, data, n, 0);
+        if (k < 0 && errno == EINTR) continue;
+        return static_cast<long>(k);
+    }
+}
+
 bool TcpSocket::send_msg(proto::MsgType type, const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> framed = proto::frame(type, payload);
     return send_all(framed.data(), framed.size());

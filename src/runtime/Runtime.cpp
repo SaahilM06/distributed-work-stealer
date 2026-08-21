@@ -9,6 +9,8 @@ Runtime::Runtime(int num_workers, bool enable_tracing)
 {
     metrics_.enable_tracing(enable_tracing);
 
+    for (auto& pool : remote_pools_) pool = std::make_unique<InjectionQueue>();
+
     for (int i = 0; i < num_workers; ++i) {
         // Worker needs: its id, the shared queue, a shutdown flag, and a
         // callback to fire when it completes a task.
@@ -25,16 +27,20 @@ Runtime::Runtime(int num_workers, bool enable_tracing)
     for (auto& iq : injection_queues_) {
         all_injection.push_back(iq.get());
     }
+    std::vector<InjectionQueue*> all_remote_pools;
+    for (auto& pool : remote_pools_) {
+        all_remote_pools.push_back(pool.get());
+    }
     for (int i = 0; i < num_workers; ++i) {
         WorkerContext ctx;
         ctx.all_queues    = all_queues;
         ctx.all_injection = all_injection;
-        ctx.remote_pool   = &remote_pool_;
+        ctx.remote_pools  = all_remote_pools;
         ctx.metrics       = &metrics_;
         ctx.shutdown_flag = &shutdown_flag_;
         ctx.submitted     = &submitted_;
         ctx.completed     = &completed_;
-        ctx.on_complete   = [this]() { on_task_complete(); };
+        ctx.on_complete   = [this](const Task& t) { on_task_complete(t); };
 
         workers_.push_back(std::make_unique<Worker>(
             i, *queues[i], *injection_queues_[i], std::move(ctx)));
@@ -94,16 +100,53 @@ void Runtime::submit_portable(TaskType type, std::vector<uint8_t> payload, uint3
         t.submit_ns = metrics_.now_ns();
     }
 
-    remote_pool_.push(std::move(t));
+    remote_pools_[static_cast<std::size_t>(type)]->push(std::move(t));
 }
 
-bool Runtime::take_portable(Task& out) {
-    return remote_pool_.pop(out);
+void Runtime::submit_task(Task t) {
+    t.task_id = next_id_++;
+
+    submitted_.fetch_add(1, std::memory_order_relaxed);
+    metrics_.record_submitted();
+    if (metrics_.tracing_enabled()) {
+        t.submit_ns = metrics_.now_ns();
+    }
+
+    if (t_current_queue != nullptr) {
+        t_current_queue->push(std::move(t));
+    } else {
+        uint32_t idx = injection_rr_.fetch_add(1, std::memory_order_relaxed) %
+                       static_cast<uint32_t>(injection_queues_.size());
+        injection_queues_[idx]->push(std::move(t));
+    }
 }
 
-void Runtime::on_remote_task_complete() {
+bool Runtime::take_portable(Task& out, TaskType preferred) {
+    // Give the thief what it asked for first — this is what routes inference work to
+    // the nodes that are fast at inference.
+    if (preferred < TaskType::Count &&
+        remote_pools_[static_cast<std::size_t>(preferred)]->pop(out)) {
+        return true;
+    }
+    // Otherwise anything queued: an idle peer running the "wrong" work still beats an
+    // idle peer running nothing.
+    for (auto& pool : remote_pools_) {
+        if (pool->pop(out)) return true;
+    }
+    return false;
+}
+
+std::size_t Runtime::portable_available() const {
+    std::size_t total = 0;
+    for (const auto& pool : remote_pools_) total += pool->size();
+    return total;
+}
+
+void Runtime::on_remote_task_complete(const Task& t) {
     // The origin counted this task as submitted, so it must count it as completed —
-    // but not as locally executed, since another node did the work.
+    // but not as locally executed, since another node did the work. The observer still
+    // runs here so a pipeline advances even when a stage executed elsewhere.
+    if (task_observer_) task_observer_(t);
     finish_one();
 }
 
@@ -116,8 +159,12 @@ void Runtime::wait_all() {
     });
 }
 
-void Runtime::on_task_complete() {
+void Runtime::on_task_complete(const Task& t) {
     local_executed_.fetch_add(1, std::memory_order_relaxed);
+    // Observer first: it may submit the next stage of a pipeline, and that submission
+    // must be counted before this task is counted as done, or wait_all() could observe
+    // submitted == completed in the gap and return with work still to come.
+    if (task_observer_) task_observer_(t);
     finish_one();
 }
 
@@ -139,7 +186,7 @@ void Runtime::execute_helped(Task& t, bool stolen) {
     } else {
         run_task(t);
     }
-    on_task_complete();
+    on_task_complete(t);
     helped_.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -162,9 +209,11 @@ bool Runtime::try_execute_one(){
         }
     }
 
-    if (remote_pool_.pop(t)) {
-        execute_helped(t, /*stolen=*/false);
-        return true;
+    for (auto& pool : remote_pools_) {
+        if (pool->pop(t)) {
+            execute_helped(t, /*stolen=*/false);
+            return true;
+        }
     }
 
     for (auto& q : queues) {

@@ -1,6 +1,26 @@
 #include "cluster/Node.hpp"
 #include "runtime/TaskRegistry.hpp"
 
+#include <algorithm>
+
+const char* steal_policy_name(StealPolicy p) {
+    switch (p) {
+        case StealPolicy::None:      return "none";
+        case StealPolicy::Random:    return "random";
+        case StealPolicy::LoadAware: return "load-aware";
+        case StealPolicy::Adaptive:  return "adaptive";
+    }
+    return "unknown";
+}
+
+bool parse_steal_policy(const std::string& s, StealPolicy& out) {
+    if (s == "none")       { out = StealPolicy::None;      return true; }
+    if (s == "random")     { out = StealPolicy::Random;    return true; }
+    if (s == "load-aware" || s == "load") { out = StealPolicy::LoadAware; return true; }
+    if (s == "adaptive")   { out = StealPolicy::Adaptive;  return true; }
+    return false;
+}
+
 #include <chrono>
 #include <cstdio>
 
@@ -26,16 +46,17 @@ bool Node::start() {
     runtime_->set_node_id(node_id_.load());
 
     running_.store(true);
+    reaper_thread_     = std::thread(&Node::reaper_loop, this);
     accept_thread_     = std::thread(&Node::accept_loop, this);
     coord_thread_      = std::thread(&Node::coordinator_loop, this);
     completion_thread_ = std::thread(&Node::completion_loop, this);
-    if (cfg_.enable_stealing) {
+    if (cfg_.policy != StealPolicy::None) {
         steal_thread_ = std::thread(&Node::steal_loop, this);
     }
 
-    std::printf("[node %u] listening on port %u  workers=%d  label=%s  stealing=%s\n",
+    std::printf("[node %u] listening on port %u  workers=%d  label=%s  policy=%s\n",
                 node_id(), port(), cfg_.num_workers, cfg_.label.c_str(),
-                cfg_.enable_stealing ? "on" : "off");
+                steal_policy_name(cfg_.policy));
     std::fflush(stdout);
     return true;
 }
@@ -49,6 +70,7 @@ void Node::stop() {
     if (coord_thread_.joinable())      coord_thread_.join();
     if (steal_thread_.joinable())      steal_thread_.join();
     if (completion_thread_.joinable()) completion_thread_.join();
+    if (reaper_thread_.joinable())     reaper_thread_.join();
 
     {
         std::lock_guard<std::mutex> lock(peer_threads_mutex_);
@@ -70,7 +92,7 @@ bool Node::register_with_coordinator() {
     coord_sock_.set_recv_timeout_ms(3000);
 
     proto::RegisterMsg msg;
-    msg.host        = "127.0.0.1";
+    msg.host        = cfg_.advertise_host;
     msg.port        = port();
     msg.num_workers = static_cast<uint32_t>(cfg_.num_workers);
     msg.label       = cfg_.label;
@@ -119,7 +141,15 @@ void Node::update_peers(const proto::NodeListMsg& msg) {
 
         bool known = false;
         for (const auto& p : peers_) {
-            if (p->info.node_id == info.node_id) { known = true; break; }
+            if (p->info.node_id == info.node_id) {
+                // Refresh the load figure; it is the input to victim selection and a
+                // stale value would aim steals at the wrong peer.
+                p->info.pending     = info.pending;
+                p->info.label       = info.label;
+                p->info.num_workers = info.num_workers;
+                known = true;
+                break;
+            }
         }
         if (known) continue;
 
@@ -179,13 +209,22 @@ void Node::serve_peer(TcpSocket conn) {
                 if (give == 0 && available > 0) give = 1;
                 if (give > req.max_tasks) give = req.max_tasks;
 
+                TaskType preferred = static_cast<TaskType>(req.preferred_type);
                 proto::StealResponseMsg resp;
                 for (std::size_t i = 0; i < give; ++i) {
                     Task t;
-                    if (!runtime_->take_portable(t)) break;
+                    if (!runtime_->take_portable(t, preferred)) break;
                     resp.tasks.push_back(std::move(t));
                 }
+                // Remember what we gave away and to whom. If the thief never reports
+                // back, the reaper re-runs these locally.
+                for (const Task& t : resp.tasks) {
+                    track_outstanding(t, req.requester_node);
+                }
                 stolen_out_.fetch_add(resp.tasks.size(), std::memory_order_relaxed);
+                // Tell the thief what is still queued here, so its next decision uses
+                // a number from this instant rather than the last heartbeat.
+                resp.victim_pending = runtime_->portable_available();
                 conn.send_msg(proto::MsgType::StealResponse, proto::encode(resp));
                 break;
             }
@@ -193,7 +232,10 @@ void Node::serve_peer(TcpSocket conn) {
                 proto::TaskResultMsg res;
                 if (!proto::decode(payload, res)) break;
                 // A task we handed out has finished elsewhere; close the books on it.
-                runtime_->on_remote_task_complete();
+                // resolve_outstanding decides whether this is still owed: if the
+                // reaper already gave up and re-ran the task locally, a late-arriving
+                // result must be ignored or the task would be counted twice.
+                resolve_outstanding(res.task_id);
                 break;
             }
             default:
@@ -218,22 +260,84 @@ void Node::steal_loop() {
         }
 
         if (!try_remote_steal()) {
-            // Nothing available anywhere — back off rather than spin on the network.
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            // Nothing available — back off rather than spin on the network. Under the
+            // adaptive policy the wait grows as the success rate falls, so a cluster
+            // with no spare work stops generating steal traffic instead of hammering
+            // peers that have nothing to give.
+            int backoff_ms = 1;
+            if (cfg_.policy == StealPolicy::Adaptive) {
+                // Exponential in *consecutive* failures, reset by any success, so a
+                // quiet cluster stops generating traffic while a busy one is polled
+                // aggressively.
+                uint32_t fails = consecutive_failures_.load(std::memory_order_relaxed);
+                backoff_ms = 1;
+                for (uint32_t i = 0; i < fails && backoff_ms < 16; ++i) backoff_ms *= 2;
+            } else {
+                backoff_ms = 2;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
         }
     }
 }
 
-bool Node::try_remote_steal() {
-    std::shared_ptr<PeerLink> victim;
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        if (peers_.empty()) return false;
-        // Random victim selection: the standard choice for work stealing, since it
-        // spreads load without any node needing global knowledge.
-        std::uniform_int_distribution<std::size_t> pick(0, peers_.size() - 1);
-        victim = peers_[pick(rng_)];
+std::shared_ptr<Node::PeerLink> Node::select_victim() {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    if (peers_.empty()) return nullptr;
+
+    switch (cfg_.policy) {
+        case StealPolicy::None:
+            return nullptr;
+
+        case StealPolicy::Random: {
+            // The classic work-stealing choice: no global knowledge needed, and it
+            // spreads requests evenly so no single victim gets swamped.
+            std::uniform_int_distribution<std::size_t> pick(0, peers_.size() - 1);
+            return peers_[pick(rng_)];
+        }
+
+        case StealPolicy::LoadAware: {
+            // Aim at whoever reported the most queued work on their last heartbeat.
+            auto best = std::max_element(peers_.begin(), peers_.end(),
+                [](const std::shared_ptr<PeerLink>& a, const std::shared_ptr<PeerLink>& b) {
+                    return a->info.pending < b->info.pending;
+                });
+            if (best != peers_.end() && (*best)->info.pending > 0) return *best;
+            // Nobody looks busy. Probe anyway: load figures only ever arrive as a
+            // result of asking, so a policy that refuses to ask when it sees no load
+            // can never discover that there is any.
+            std::uniform_int_distribution<std::size_t> pick(0, peers_.size() - 1);
+            return peers_[pick(rng_)];
+        }
+
+        case StealPolicy::Adaptive: {
+            // Score = reported load, discounted by how often this peer has recently
+            // come back empty. Heartbeat load is up to one interval stale, so a peer
+            // that keeps saying "nothing here" is trusted less than its number claims.
+            std::shared_ptr<PeerLink> best;
+            double best_score = 0.0;
+            for (const auto& p : peers_) {
+                double load   = static_cast<double>(p->info.pending);
+                double misses = static_cast<double>(p->misses.load(std::memory_order_relaxed));
+                double score  = load / (1.0 + misses);
+                if (score > best_score) {
+                    best_score = score;
+                    best       = p;
+                }
+            }
+            if (best) return best;
+
+            // Every peer looks idle. Probe one at random anyway — load figures lag, so
+            // "everyone is idle" may simply be out of date.
+            std::uniform_int_distribution<std::size_t> pick(0, peers_.size() - 1);
+            return peers_[pick(rng_)];
+        }
     }
+    return nullptr;
+}
+
+bool Node::try_remote_steal() {
+    std::shared_ptr<PeerLink> victim = select_victim();
+    if (!victim) return false;
 
     std::lock_guard<std::mutex> lock(victim->mutex);
 
@@ -248,6 +352,7 @@ bool Node::try_remote_steal() {
     // Ask for enough to keep this node's workers busy for a while, so the cost of the
     // round trip is amortised over many tasks rather than paid per task.
     req.max_tasks      = static_cast<uint32_t>(cfg_.num_workers) * 4;
+    req.preferred_type = static_cast<uint16_t>(preferred_type_);
 
     steal_requests_.fetch_add(1, std::memory_order_relaxed);
     if (!victim->sock.send_msg(proto::MsgType::StealRequest, proto::encode(req))) {
@@ -265,8 +370,31 @@ bool Node::try_remote_steal() {
     }
 
     proto::StealResponseMsg resp;
-    if (!proto::decode(payload, resp) || resp.tasks.empty()) return false;
+    if (!proto::decode(payload, resp)) {
+        victim->misses.fetch_add(1, std::memory_order_relaxed);
+        steal_misses_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
 
+    // Record the victim's live depth whether or not it gave us anything — an empty
+    // answer is still information, and it is fresher than any heartbeat.
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        victim->info.pending = resp.victim_pending;
+    }
+
+    if (resp.tasks.empty()) {
+        victim->misses.fetch_add(1, std::memory_order_relaxed);
+        steal_misses_.fetch_add(1, std::memory_order_relaxed);
+        consecutive_failures_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    victim->misses.store(0, std::memory_order_relaxed);
+    // Any success clears the backoff. Using a lifetime success rate instead makes the
+    // backoff sticky: failures while the cluster is still starting up would suppress
+    // stealing for the rest of the run, long after work became available.
+    consecutive_failures_.store(0, std::memory_order_relaxed);
     for (const Task& t : resp.tasks) {
         accept_stolen_task(t);
     }
@@ -289,7 +417,94 @@ void Node::accept_stolen_task(const Task& remote) {
     });
 }
 
+int64_t Node::now_ms() const {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - origin_time_).count();
+}
+
+void Node::track_outstanding(const Task& t, uint32_t thief_node) {
+    std::lock_guard<std::mutex> lock(outstanding_mutex_);
+    OutstandingTask entry;
+    entry.task       = t;
+    entry.thief_node = thief_node;
+    entry.sent_ms    = now_ms();
+    outstanding_.emplace(t.task_id, std::move(entry));
+}
+
+void Node::resolve_outstanding(uint64_t task_id) {
+    Task finished;
+    {
+        std::lock_guard<std::mutex> lock(outstanding_mutex_);
+        auto it = outstanding_.find(task_id);
+        if (it == outstanding_.end()) {
+            // Already reaped and re-run locally — the local run has been (or will be)
+            // counted, so completing it again here would overshoot `submitted`.
+            return;
+        }
+        finished = std::move(it->second.task);
+        outstanding_.erase(it);
+    }
+    runtime_->on_remote_task_complete(finished);
+}
+
+std::size_t Node::outstanding_count() const {
+    std::lock_guard<std::mutex> lock(outstanding_mutex_);
+    return outstanding_.size();
+}
+
+void Node::reap_outstanding() {
+    std::vector<Task> lost;
+    {
+        std::lock_guard<std::mutex> lock(outstanding_mutex_);
+        int64_t now = now_ms();
+        for (auto it = outstanding_.begin(); it != outstanding_.end(); ) {
+            if (now - it->second.sent_ms > cfg_.task_timeout_ms) {
+                lost.push_back(std::move(it->second.task));
+                it = outstanding_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    for (Task& t : lost) {
+        std::printf("[node %u] task %llu timed out on its thief — re-running locally\n",
+                    node_id(), (unsigned long long)t.task_id);
+        std::fflush(stdout);
+        tasks_reassigned_.fetch_add(1, std::memory_order_relaxed);
+
+        // Re-run here rather than putting it back in the portable pool: the peer that
+        // just dropped it could otherwise steal it straight back and drop it again,
+        // forever. Setting `fn` makes the task non-portable, while keeping `payload`
+        // means a multi-stage job can still advance its chain when this run finishes —
+        // dropping the payload would silently strand that request.
+        Task rerun     = t;
+        TaskType type  = t.type;
+        std::vector<uint8_t> payload = t.payload;
+        rerun.fn = [type, payload]() {
+            TaskRegistry::instance().run(type, payload);
+        };
+        runtime_->submit_task(std::move(rerun));
+        // The re-run is a *new* submission, so cancel the original's outstanding debt.
+        // Passed with a cleared type so the observer does not advance the pipeline
+        // twice: the re-run itself will advance it when it completes.
+        Task settled;
+        settled.task_id = t.task_id;
+        runtime_->on_remote_task_complete(settled);
+    }
+}
+
+void Node::reaper_loop() {
+    while (running_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (!running_.load()) break;
+        reap_outstanding();
+    }
+}
+
 void Node::enqueue_completion(uint32_t origin_node, uint64_t task_id) {
+    // Fault injection: behave like a node that took the work and then vanished.
+    if (cfg_.drop_completions) return;
     {
         std::lock_guard<std::mutex> lock(completions_mutex_);
         completions_.emplace_back(origin_node, task_id);

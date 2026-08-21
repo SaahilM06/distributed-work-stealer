@@ -122,12 +122,12 @@ static void test_no_stealing_keeps_work_local() {
     NodeConfig idle_cfg;
     idle_cfg.coordinator_port = coord.port();
     idle_cfg.num_workers      = 2;
-    idle_cfg.enable_stealing  = false;
+    idle_cfg.policy           = StealPolicy::None;
 
     NodeConfig origin_cfg;
     origin_cfg.coordinator_port = coord.port();
     origin_cfg.num_workers      = 2;
-    origin_cfg.enable_stealing  = false;
+    origin_cfg.policy           = StealPolicy::None;
 
     Node idle(idle_cfg);
     Node origin(origin_cfg);
@@ -154,10 +154,70 @@ static void test_no_stealing_keeps_work_local() {
     coord.stop();
 }
 
+// Phase 10: a node that takes work and then dies must not hang the origin forever.
+// The thief here runs stolen tasks but never reports them, which is exactly what the
+// origin sees when a peer crashes after a successful steal.
+static void test_dead_thief_does_not_hang_origin() {
+    constexpr int NUM_TASKS = 120;
+    constexpr uint32_t COST = 10000;
+
+    g_executed.store(0);
+
+    Coordinator coord(0);
+    CHECK(coord.start());
+
+    NodeConfig thief_cfg;
+    thief_cfg.coordinator_port = coord.port();
+    thief_cfg.num_workers      = 2;
+    thief_cfg.label            = "thief";
+    thief_cfg.drop_completions = true;    // <- simulated death after taking work
+
+    NodeConfig origin_cfg;
+    origin_cfg.coordinator_port = coord.port();
+    origin_cfg.num_workers      = 1;
+    origin_cfg.label            = "origin";
+    origin_cfg.policy           = StealPolicy::None;  // origin only gives, never takes
+    origin_cfg.task_timeout_ms  = 500;                // give up quickly for the test
+
+    Node thief(thief_cfg);
+    Node origin(origin_cfg);
+    CHECK(thief.start());
+    CHECK(origin.start());
+
+    CHECK(wait_until([&]() { return thief.peer_count() >= 1 && origin.peer_count() >= 1; }, 5000));
+
+    for (int i = 0; i < NUM_TASKS; ++i) {
+        origin.runtime().submit_portable(TaskType::SyntheticCompute, encode_cost(COST), COST);
+    }
+
+    // The whole point: this returns. Before the reaper existed it would block forever,
+    // because the tasks the thief swallowed could only ever be completed by a
+    // TaskResult that is never coming.
+    origin.runtime().wait_all();
+
+    CHECK(origin.tasks_stolen_out() > 0);          // work really was handed over
+    CHECK(origin.tasks_reassigned() > 0);          // and really was recovered
+    CHECK(origin.outstanding_count() == 0);        // no task left un-accounted for
+
+    // At-least-once, not exactly-once: the thief did run the tasks it swallowed, and
+    // the origin ran them again. Every task ran at least once, some ran twice.
+    CHECK(g_executed.load() >= NUM_TASKS);
+
+    std::printf("PASS test_dead_thief_does_not_hang_origin: "
+                "%llu handed out, %llu recovered after timeout\n",
+                (unsigned long long)origin.tasks_stolen_out(),
+                (unsigned long long)origin.tasks_reassigned());
+
+    origin.stop();
+    thief.stop();
+    coord.stop();
+}
+
 int main() {
     register_handlers();
     test_cluster_remote_stealing();
     test_no_stealing_keeps_work_local();
+    test_dead_thief_does_not_hang_origin();
     std::printf("All tests passed.\n");
     return 0;
 }

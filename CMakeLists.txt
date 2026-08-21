@@ -44,6 +44,9 @@ add_library(hydra_runtime STATIC
   src/metrics/Metrics.cpp
   src/net/Protocol.cpp
   src/net/Socket.cpp
+  src/inference/InferenceJob.cpp
+  src/inference/HttpServer.cpp
+  src/inference/JobManager.cpp
   src/cluster/Coordinator.cpp
   src/cluster/Node.cpp
 )
@@ -67,6 +70,9 @@ target_link_libraries(hydra_coordinator PRIVATE hydra_runtime)
 add_executable(hydra_node apps/hydra_node.cpp)
 target_link_libraries(hydra_node PRIVATE hydra_runtime)
 
+add_executable(hydra_inference apps/hydra_inference.cpp)
+target_link_libraries(hydra_inference PRIVATE hydra_runtime)
+
 # ── Tests ────────────────────────────────────────────────────────────────────
 enable_testing()
 
@@ -74,16 +80,19 @@ add_executable(test_deque    tests/test_deque.cpp)
 add_executable(test_runtime  tests/test_runtime.cpp)
 add_executable(test_protocol tests/test_protocol.cpp)
 add_executable(test_cluster  tests/test_cluster.cpp)
+add_executable(test_inference tests/test_inference.cpp)
 
 target_link_libraries(test_deque    PRIVATE hydra_runtime)
 target_link_libraries(test_runtime  PRIVATE hydra_runtime)
 target_link_libraries(test_protocol PRIVATE hydra_runtime)
 target_link_libraries(test_cluster  PRIVATE hydra_runtime)
+target_link_libraries(test_inference PRIVATE hydra_runtime)
 
 add_test(NAME deque    COMMAND test_deque)
 add_test(NAME runtime  COMMAND test_runtime)
 add_test(NAME protocol COMMAND test_protocol)
 add_test(NAME cluster  COMMAND test_cluster)
+add_test(NAME inference COMMAND test_inference)
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 message(STATUS "Build type  : ${CMAKE_BUILD_TYPE}")

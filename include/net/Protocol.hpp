@@ -33,6 +33,9 @@ struct NodeInfo {
     uint16_t    port    = 0;
     uint32_t    num_workers = 0;
     std::string label;          // e.g. "gpu" / "cpu" — used by the adaptive scheduler
+    // Load as of this node's last heartbeat. Redistributed by the coordinator so a
+    // thief can aim at the busiest peer instead of guessing at random.
+    uint64_t    pending = 0;
 };
 
 struct RegisterMsg {
@@ -59,10 +62,17 @@ struct NodeListMsg {
 struct StealRequestMsg {
     uint32_t requester_node = 0;
     uint32_t max_tasks      = 1;
+    // The kind of work the thief is best at. The victim hands over tasks of this type
+    // first, which is how "inference goes to the GPU box" actually happens.
+    uint16_t preferred_type = static_cast<uint16_t>(TaskType::Count);  // Count = no preference
 };
 
 struct StealResponseMsg {
     std::vector<Task> tasks;  // portable tasks only
+    // The victim's queue depth at the moment it answered. Heartbeat load is up to one
+    // interval stale — useless for a job that finishes in less than that — whereas this
+    // is exact and arrives on every interaction, including the ones that come back empty.
+    uint64_t victim_pending = 0;
 };
 
 struct TaskResultMsg {

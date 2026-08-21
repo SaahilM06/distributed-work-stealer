@@ -28,11 +28,11 @@ Scope decisions:
 - [x] Phase 6 — Metrics + tracing (p50/p95/p99, CSV)
 - [x] Phase 7 — TCP node runtime + coordinator
 - [x] Phase 8 — Remote work stealing
-- [ ] Phase 9 — Adaptive scheduler
-- [ ] Phase 10 — Fault tolerance (node death, task retry)
-- [ ] Phase 11 — ML Inference Engine (capstone)
+- [x] Phase 9 — Adaptive scheduler
+- [x] Phase 10 — Fault tolerance (node death, task retry)
+- [x] Phase 11 — ML Inference Engine (capstone)
 - [ ] Phase 12 — Real inference (ONNX Runtime)
-- [ ] Phase 13 — Performance report
+- [x] Phase 13 — Performance report
 
 ## Phase details
 
@@ -79,32 +79,61 @@ the machine's full capacity alone; the stealing-on result lands close to a singl
 8-worker control, so the cluster recovers most of what shared memory would give for the
 same cores, minus serialization and a TCP round trip per steal batch.
 
-**Phase 9 — Adaptive scheduler.** Nodes report a capability profile (measured
-per-`TaskType` throughput, or a configured GPU/CPU tag) alongside queue depth, steal
-success rate, and network latency as scheduling signals — this is where GPU-preferring
-placement for inference tasks gets implemented.
+**Phase 9 — Adaptive scheduler.** Done. Victim selection became a policy knob
+(`--policy none|random|load-aware|adaptive`) so the alternatives could be measured
+rather than asserted. Nodes advertise a capability (`--label gpu` prefers the inference
+task type) and a thief sends that preference with each steal request, so a victim hands
+over the work the thief is fastest at; portable tasks are held in one pool per task type
+so that selection is a lookup rather than a scan.
 
-**Phase 10 — Fault tolerance.** Node death detection (missed heartbeats) + task
-retry/resubmission, so a multi-stage request pipeline doesn't hang if a node dies
-mid-flight.
+The measurement changed the design twice. Load figures originally travelled only on
+300ms heartbeats, which is useless for a job that finishes sooner than that — the
+victim's live queue depth now rides back on every steal response, including empty ones.
+And the adaptive backoff originally used a lifetime success rate, which let startup
+failures suppress stealing for an entire run; it is now exponential in *consecutive*
+failures and resets on any success. Before those fixes the "smart" policies lost to
+random stealing.
 
-**Phase 11 — ML Inference Engine.**
-- Chained continuations: `Future<T>::then(fn)` so a request pipeline (a linear
-  dependency chain) can be built without blocking a thread on `get()` between stages —
-  today's `spawn`/`Future` only supports fork + two-way join.
-- Job/Request Manager: builds the 4-stage task graph per request, chains stages via
-  `then()`.
-- Simulated inference workload: cost varies by image resolution / sequence length /
-  model id, drawn from a distribution instead of a flat constant.
-- Local HTTP API (e.g. `cpp-httplib`): submit endpoint returns a job id, status/result
-  endpoint polls the Job Manager.
-- Benchmark suite: static round-robin vs random work-stealing vs HydraRT adaptive
-  scheduling, under skewed multi-request-type load across the real multi-node cluster
-  from Phases 7-8 — throughput, p95/p99 latency, worker utilization/idle time, steal
-  overhead.
+**Phase 10 — Fault tolerance.** Done. A node records every task it hands to a thief;
+if no result comes back within `task_timeout_ms`, a reaper thread re-runs it locally.
+Without this a peer that dies after a successful steal hangs the origin's `wait_all()`
+forever, because the task is counted as submitted and the only thing that could ever
+complete it is a message that is never coming. A late-arriving result for an
+already-reaped task is ignored, so recovery cannot double-count. Semantics are
+at-least-once, not exactly-once: a task may run on both the dead-looking peer and the
+origin. Re-runs are made non-portable so the peer that just dropped one cannot steal it
+straight back and drop it again. `NodeConfig::drop_completions` is a fault-injection
+switch used by the test to simulate a node that takes work and vanishes.
 
-**Phase 12 — Real inference.** Swap ONNX Runtime in for at least one workload (e.g.
-image classification) once the scheduling story is proven on simulated costs.
+**Phase 11 — ML Inference Engine.** Done. `hydra_inference` is a cluster node that also
+serves HTTP: `POST /infer?model=text&seq=512`, `GET /status?id=N`, `GET /stats`.
 
-**Phase 13 — Performance report.** Write up the static vs random vs adaptive comparison
-with real measured numbers.
+Each request becomes a four-stage chain (decode → preprocess → infer → postprocess).
+The stages are a dependency chain, not a fork-join, so each stage's task submits its
+successor on completion instead of a thread blocking on a future in between — a request
+in flight occupies no thread at all while it waits. `Future<T>::then()` exists for the
+in-process case, but the distributed pipeline is driven by a task-completion observer on
+the Runtime, which fires whether the stage ran locally or was stolen and run elsewhere.
+The observer runs *before* the task is counted complete, so `wait_all()` cannot see a
+momentarily balanced ledger and return with stages still to come.
+
+Cost is simulated but deliberately skewed: transformer inference is quadratic in
+sequence length, so two requests that look alike can differ by orders of magnitude.
+That is what defeats any up-front split.
+
+Measured (`results/phase11_inference_bench.txt`, best of 5, 3 nodes on one 8-core M2,
+3000 requests): against static assignment, **2.07x throughput** (17.8k → 37.0k req/s)
+and **52% lower p99 latency** (164ms → 78ms). Against random-victim stealing, 1.90x
+throughput and 47% lower p99. Load-aware and adaptive tie — the capability affinity did
+not beat plain load-awareness on this workload, and the results file says so.
+
+**Phase 12 — Real inference.** Not started; the only phase still open. Swap ONNX
+Runtime in behind the existing `TaskRegistry` handler for the inference stage. The
+seam is already there: `JobManager::register_handlers` is the single place where the
+inference stage's work is defined, so nothing above it has to change. Needs the ONNX
+Runtime C++ library plus a model file, which is why it stayed deferred — the scheduling
+result above does not depend on it.
+
+**Phase 13 — Performance report.** Done, as `results/phase11_inference_bench.txt`
+(policy comparison with analysis) alongside `results/phase7_8_cluster.txt` (remote
+stealing) and `results/phase6_bench.txt` (tracing overhead).

@@ -30,7 +30,7 @@ void Worker::execute(Task& t, bool stolen) {
     } else {
         run_task(t);
     }
-    ctx_.on_complete();
+    ctx_.on_complete(t);
 }
 
 void Worker::run() {
@@ -71,7 +71,11 @@ void Worker::run() {
         // Portable tasks. Local workers drain this pool too — running work here beats
         // shipping it over a network — so remote nodes only win tasks from it while
         // this node's workers are busy, which is exactly when stealing should happen.
-        if (ctx_.remote_pool != nullptr && ctx_.remote_pool->pop(t)) {
+        bool got_portable = false;
+        for (InjectionQueue* pool : ctx_.remote_pools) {
+            if (pool->pop(t)) { got_portable = true; break; }
+        }
+        if (got_portable) {
             idle_rounds = 0;
             execute(t, /*stolen=*/false);
             continue;

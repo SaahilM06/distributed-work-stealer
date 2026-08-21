@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 
 // Set by SIGTERM/SIGINT so a node shut down by the launcher still prints its RESULT
@@ -35,7 +36,15 @@ static void synthetic_work(uint32_t iterations) {
 }
 
 // Registered identically on every node — this is what makes a task shippable.
-static void register_handlers() {
+//
+// Two task types stand in for heterogeneous work:
+//   SyntheticCompute  — general work, same speed everywhere ("preprocessing")
+//   MandelbrotTile    — work a "gpu" node runs much faster ("inference")
+// The speed difference is simulated by dividing the iteration count, which is how a
+// single-machine cluster can still exercise capability-aware scheduling.
+static void register_handlers(const std::string& label) {
+    const uint32_t inference_divisor = (label == "gpu") ? 8u : 1u;
+
     TaskRegistry::instance().register_handler(
         TaskType::SyntheticCompute,
         [](const std::vector<uint8_t>& payload) {
@@ -43,6 +52,15 @@ static void register_handlers() {
             uint32_t iterations = r.u32();
             if (!r.ok()) return;
             synthetic_work(iterations);
+        });
+
+    TaskRegistry::instance().register_handler(
+        TaskType::MandelbrotTile,
+        [inference_divisor](const std::vector<uint8_t>& payload) {
+            ByteReader r(payload);
+            uint32_t iterations = r.u32();
+            if (!r.ok()) return;
+            synthetic_work(iterations / inference_divisor);
         });
 }
 
@@ -68,17 +86,32 @@ int main(int argc, char** argv) {
             if (const char* v = next()) task_cost = static_cast<uint32_t>(std::atoi(v));
         } else if (std::strcmp(argv[i], "--seconds") == 0) {
             if (const char* v = next()) run_secs = std::atoi(v);
+        } else if (std::strcmp(argv[i], "--coordinator-host") == 0) {
+            if (const char* v = next()) cfg.coordinator_host = v;
+        } else if (std::strcmp(argv[i], "--advertise-host") == 0) {
+            if (const char* v = next()) cfg.advertise_host = v;
+        } else if (std::strcmp(argv[i], "--policy") == 0) {
+            if (const char* v = next()) {
+                if (!parse_steal_policy(v, cfg.policy)) {
+                    std::fprintf(stderr, "unknown --policy '%s' "
+                                 "(none|random|load-aware|adaptive)\n", v);
+                    return 2;
+                }
+            }
         } else if (std::strcmp(argv[i], "--no-stealing") == 0) {
-            cfg.enable_stealing = false;
+            cfg.policy = StealPolicy::None;
         }
     }
 
-    register_handlers();
+    register_handlers(cfg.label);
 
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
 
     Node node(cfg);
+    // A "gpu" node advertises that inference work belongs here, so victims hand it
+    // that type first. This is the capability signal the adaptive policy acts on.
+    if (cfg.label == "gpu") node.set_preferred_type(TaskType::MandelbrotTile);
     if (!node.start()) return 1;
 
     // Give the coordinator a moment to hand out the peer list, so a node that submits
@@ -92,8 +125,12 @@ int main(int argc, char** argv) {
                     node.node_id(), submit_tasks, task_cost);
         std::fflush(stdout);
         for (int i = 0; i < submit_tasks; ++i) {
-            node.runtime().submit_portable(TaskType::SyntheticCompute,
-                                           encode_synthetic(task_cost), task_cost);
+            // Half the batch is GPU-friendly "inference" work. A capability-aware
+            // scheduler should push those toward gpu-labelled nodes; random stealing
+            // has no reason to.
+            TaskType type = (i % 2 == 0) ? TaskType::MandelbrotTile
+                                         : TaskType::SyntheticCompute;
+            node.runtime().submit_portable(type, encode_synthetic(task_cost), task_cost);
         }
         node.runtime().wait_all();
 
@@ -115,12 +152,15 @@ int main(int argc, char** argv) {
     // also counts tasks handed to a thief — summing that across nodes double counts.
     uint64_t executed = node.runtime().local_executed();
 
-    std::printf("[node %u] RESULT executed=%llu"
-                " stolen_in=%llu stolen_out=%llu steal_requests=%llu peers=%zu\n",
-                node.node_id(), (unsigned long long)executed,
+    std::printf("[node %u] RESULT label=%s policy=%s executed=%llu"
+                " stolen_in=%llu stolen_out=%llu steal_requests=%llu"
+                " steal_success=%.1f%% peers=%zu\n",
+                node.node_id(), cfg.label.c_str(), steal_policy_name(cfg.policy),
+                (unsigned long long)executed,
                 (unsigned long long)node.tasks_stolen_in(),
                 (unsigned long long)node.tasks_stolen_out(),
                 (unsigned long long)node.steal_requests_sent(),
+                node.steal_success_rate() * 100.0,
                 node.peer_count());
     std::fflush(stdout);
 

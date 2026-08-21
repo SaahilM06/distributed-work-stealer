@@ -53,6 +53,7 @@ static void encode_node_info(ByteWriter& w, const NodeInfo& n) {
     w.u16(n.port);
     w.u32(n.num_workers);
     w.str(n.label);
+    w.u64(n.pending);
 }
 
 static NodeInfo decode_node_info(ByteReader& r) {
@@ -62,6 +63,7 @@ static NodeInfo decode_node_info(ByteReader& r) {
     n.port        = r.u16();
     n.num_workers = r.u32();
     n.label       = r.str();
+    n.pending     = r.u64();
     return n;
 }
 
@@ -99,6 +101,7 @@ std::vector<uint8_t> encode(const StealRequestMsg& m) {
     ByteWriter w;
     w.u32(m.requester_node);
     w.u32(m.max_tasks);
+    w.u16(m.preferred_type);
     return w.buf();
 }
 
@@ -106,6 +109,7 @@ std::vector<uint8_t> encode(const StealResponseMsg& m) {
     ByteWriter w;
     w.u32(static_cast<uint32_t>(m.tasks.size()));
     for (const Task& t : m.tasks) encode_task(w, t);
+    w.u64(m.victim_pending);
     return w.buf();
 }
 
@@ -156,6 +160,7 @@ bool decode(const std::vector<uint8_t>& b, StealRequestMsg& m) {
     ByteReader r(b);
     m.requester_node = r.u32();
     m.max_tasks      = r.u32();
+    m.preferred_type = r.u16();
     return r.ok();
 }
 
@@ -169,6 +174,7 @@ bool decode(const std::vector<uint8_t>& b, StealResponseMsg& m) {
         if (!r.ok()) return false;
         m.tasks.push_back(std::move(t));
     }
+    m.victim_pending = r.u64();
     return r.ok();
 }
 
