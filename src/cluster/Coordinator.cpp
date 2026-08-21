@@ -125,6 +125,7 @@ proto::NodeListMsg Coordinator::current_nodes() const {
             out.nodes.push_back(rec.info);
         }
     }
+    //return
     return out;
 }
 
