@@ -269,9 +269,13 @@ void Node::steal_loop() {
                 // Exponential in *consecutive* failures, reset by any success, so a
                 // quiet cluster stops generating traffic while a busy one is polled
                 // aggressively.
+                // Capped low on purpose: the cap is the worst-case delay before an
+                // idle node notices that work has appeared somewhere. Backing off to
+                // tens of milliseconds saves negligible CPU and makes a node useless
+                // for any burst of work shorter than the backoff itself.
                 uint32_t fails = consecutive_failures_.load(std::memory_order_relaxed);
                 backoff_ms = 1;
-                for (uint32_t i = 0; i < fails && backoff_ms < 16; ++i) backoff_ms *= 2;
+                for (uint32_t i = 0; i < fails && backoff_ms < 8; ++i) backoff_ms *= 2;
             } else {
                 backoff_ms = 2;
             }

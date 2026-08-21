@@ -1,0 +1,48 @@
+=== HydraRT: distributed inference engine — scheduling policy comparison ===
+requests=400  reps=3  workers/node=2  model=models/mobilenet_v2.onnx
+cluster: origin(cpu) + helper(gpu) + helper(cpu); inference stage is 8x faster on gpu
+
+policy          time_ms        req/s     p50_ms     p95_ms     p99_ms   stolen
+---------------------------------------------------------------------------------
+none             1959.7          204      985.8     1884.4     1938.8        0
+random            827.8          483      441.1      786.8      811.0      326
+load-aware        799.4          500      412.3      761.0      780.3      323
+adaptive          826.2          484      427.9      783.7      808.1      325
+
+Best of 3 runs per policy. 'stolen' counts pipeline stages the origin handed
+to another node. Latency percentiles are end-to-end per request (all four stages).
+
+-------------------------------------------------------------------------------
+Phase 12 notes — real model execution
+-------------------------------------------------------------------------------
+The inference stage runs a real MobileNetV2 forward pass through ONNX Runtime
+(opset 13, float32 [batch,3,224,224]) instead of a busy loop. Only that stage is
+real; decode/preprocess/postprocess stay simulated, and text requests stay simulated
+because the exported model is an image classifier. Roughly half of the generated
+requests are image requests, so about half of them execute the model.
+
+Weights are random rather than pretrained. Execution cost depends on the graph and
+the arithmetic, not on the values in the weights, and this avoids a large download —
+the operators, shapes and FLOPs are identical to the pretrained network.
+
+Against static assignment:
+  throughput   204 -> 500 req/s    = 2.45x
+  p50 latency  985.8 -> 412.3 ms   = 58% lower
+  p99 latency  1938.8 -> 780.3 ms  = 60% lower
+
+The headline improvement is larger than with simulated cost (2.45x vs 2.07x) for the
+straightforward reason that real inference is far more expensive than the simulated
+stand-in: a MobileNetV2 pass is tens of milliseconds against a few hundred
+microseconds, so an idle helper node is worth much more.
+
+The more interesting difference is that random, load-aware and adaptive have
+converged — 827.8 / 799.4 / 826.2 ms, all within noise of each other, where the
+simulated workload separated them clearly (154 vs 81 ms). Task granularity explains
+it: when one task is ~20ms of real model execution, any steal moves a large amount
+of work, so picking the *best* victim matters much less than picking one at all.
+Sophisticated placement earns its keep on fine-grained tasks; on coarse ones, simply
+not being idle dominates.
+
+Reproduce:
+  python3 scripts/export_model.py models/mobilenet_v2.onnx
+  MODEL=models/mobilenet_v2.onnx ./scripts/bench_inference.sh 400 3

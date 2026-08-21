@@ -10,8 +10,9 @@ interesting core; the inference engine is the workload that proves adaptive work
 beats static assignment, backed by a real throughput/p95/p99-latency benchmark.
 
 Scope decisions:
-- Inference cost is **simulated first** (distributions keyed by request parameters), with
-  real ONNX Runtime models swapped in later once the scheduling story is proven.
+- Inference cost was **simulated first** (distributions keyed by request parameters),
+  with a real ONNX Runtime model swapped in at Phase 12 once the scheduling story was
+  proven. Both paths still work; the model is optional at build and run time.
 - Heterogeneous workers are **real separate node processes/machines**, not worker-class
   tags simulated inside one process — so the inference engine depends on the runtime
   actually having a network layer (Phases 7-8) before it's meaningful.
@@ -31,7 +32,7 @@ Scope decisions:
 - [x] Phase 9 — Adaptive scheduler
 - [x] Phase 10 — Fault tolerance (node death, task retry)
 - [x] Phase 11 — ML Inference Engine (capstone)
-- [ ] Phase 12 — Real inference (ONNX Runtime)
+- [x] Phase 12 — Real inference (ONNX Runtime)
 - [x] Phase 13 — Performance report
 
 ## Phase details
@@ -127,13 +128,38 @@ and **52% lower p99 latency** (164ms → 78ms). Against random-victim stealing, 
 throughput and 47% lower p99. Load-aware and adaptive tie — the capability affinity did
 not beat plain load-awareness on this workload, and the results file says so.
 
-**Phase 12 — Real inference.** Not started; the only phase still open. Swap ONNX
-Runtime in behind the existing `TaskRegistry` handler for the inference stage. The
-seam is already there: `JobManager::register_handlers` is the single place where the
-inference stage's work is defined, so nothing above it has to change. Needs the ONNX
-Runtime C++ library plus a model file, which is why it stayed deferred — the scheduling
-result above does not depend on it.
+**Phase 12 — Real inference.** Done. The inference stage runs a real MobileNetV2
+forward pass through ONNX Runtime instead of a busy loop. `OnnxModel` wraps a single
+shared `Ort::Session` — sessions are safe to `Run()` concurrently, and one per worker
+would multiply the model's memory for no gain. ORT's own thread pool is pinned to one
+thread: the runtime already has workers, and letting ORT spawn its own on top would
+oversubscribe the machine and invalidate the measurements. Parallelism comes from
+running many requests at once, not from splitting one.
 
-**Phase 13 — Performance report.** Done, as `results/phase11_inference_bench.txt`
-(policy comparison with analysis) alongside `results/phase7_8_cluster.txt` (remote
-stealing) and `results/phase6_bench.txt` (tracing overhead).
+Optional at build time (`-DHYDRA_WITH_ONNX=ON`, auto-detected) and at run time
+(`--model path.onnx`); without either, everything falls back to simulated cost, so the
+project still builds and every other result still stands on a machine with no model
+runtime. Only the inference stage becomes real — the other three stages, and text
+requests, stay simulated because the exported model is an image classifier.
+
+    brew install onnxruntime
+    python3 scripts/export_model.py models/mobilenet_v2.onnx
+    MODEL=models/mobilenet_v2.onnx ./scripts/bench_inference.sh 400 3
+
+Measured (`results/phase12_onnx_bench.txt`, best of 3, 400 requests): **2.45x
+throughput** (204 → 500 req/s) and **60% lower p99 latency** (1939 → 780 ms) against
+static assignment. Larger than the simulated figure (2.07x) simply because a real
+forward pass is tens of milliseconds against a few hundred microseconds, so an idle
+helper is worth much more.
+
+The finding worth keeping: random, load-aware and adaptive all converge here (828 /
+799 / 826 ms, within noise), where the simulated workload separated them sharply (154
+vs 81 ms). When a single task is ~20ms of real model execution, any steal moves a lot
+of work, so choosing the *best* victim matters far less than not being idle.
+Sophisticated placement earns its keep on fine-grained tasks; on coarse ones it does
+not.
+
+**Phase 13 — Performance report.** Done: `results/phase11_inference_bench.txt`
+(policy comparison, simulated cost), `results/phase12_onnx_bench.txt` (same comparison
+with real model execution), `results/phase7_8_cluster.txt` (remote stealing) and
+`results/phase6_bench.txt` (tracing overhead).

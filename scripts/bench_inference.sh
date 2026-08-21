@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Phase 11e: compare scheduling policies on the distributed inference workload.
+# Compare scheduling policies on the distributed inference workload.
+#
+# Set MODEL=models/mobilenet_v2.onnx to run the inference stage on a real ONNX model.
 #
 # Cluster shape (all processes on this machine):
 #   node A  label=cpu  submits every request  (the origin)
@@ -18,6 +20,10 @@ cd "$(dirname "$0")/.."
 REQUESTS=${1:-400}
 REPS=${2:-3}
 WORKERS=${WORKERS:-2}
+# Set MODEL=models/mobilenet_v2.onnx to run the inference stage on a real ONNX model
+# instead of the simulated cost. Every node must load the same model, since any node
+# may end up executing any stage.
+MODEL=${MODEL:-}
 BIN=./build
 mkdir -p results
 
@@ -32,16 +38,16 @@ run_policy() {
 
   # Idle helpers. They hold no work of their own; anything they run was stolen.
   "$BIN/hydra_inference" --coordinator-port "$cp" --workers "$WORKERS" \
-      --label gpu --policy "$policy" --seconds 60 > "$out/gpu.log" 2>&1 &
+      --label gpu --policy "$policy" ${MODEL:+--model "$MODEL"} --seconds 60 > "$out/gpu.log" 2>&1 &
   local gpu_pid=$!
   "$BIN/hydra_inference" --coordinator-port "$cp" --workers "$WORKERS" \
-      --label cpu --policy "$policy" --seconds 60 > "$out/cpu.log" 2>&1 &
+      --label cpu --policy "$policy" ${MODEL:+--model "$MODEL"} --seconds 60 > "$out/cpu.log" 2>&1 &
   local cpu_pid=$!
   sleep 0.6
 
   # The origin: submits everything, then waits for the whole cluster to finish it.
   "$BIN/hydra_inference" --coordinator-port "$cp" --workers "$WORKERS" \
-      --label cpu --policy "$policy" --bench "$REQUESTS" > "$out/origin.log" 2>&1 &
+      --label cpu --policy "$policy" ${MODEL:+--model "$MODEL"} --bench "$REQUESTS" > "$out/origin.log" 2>&1 &
   local origin_pid=$!
 
   wait "$origin_pid" 2>/dev/null
@@ -55,8 +61,8 @@ run_policy() {
   echo "$line"
 }
 
-echo "=== HydraRT Phase 11: distributed inference engine — scheduling policy comparison ==="
-echo "requests=$REQUESTS  reps=$REPS  workers/node=$WORKERS"
+echo "=== HydraRT: distributed inference engine — scheduling policy comparison ==="
+echo "requests=$REQUESTS  reps=$REPS  workers/node=$WORKERS  model=${MODEL:-simulated}"
 echo "cluster: origin(cpu) + helper(gpu) + helper(cpu); inference stage is 8x faster on gpu"
 echo
 

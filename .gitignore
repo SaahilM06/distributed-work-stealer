@@ -1,5 +1,7 @@
 build/
 build-debug/
 results/
+# Exported ONNX models: large binaries, regenerate with scripts/export_model.py
+models/
 *.o
 *.a

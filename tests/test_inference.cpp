@@ -3,6 +3,7 @@
 #include "cluster/Node.hpp"
 #include "inference/InferenceJob.hpp"
 #include "inference/JobManager.hpp"
+#include "inference/OnnxModel.hpp"
 #include "runtime/Runtime.hpp"
 
 #include <atomic>
@@ -107,7 +108,12 @@ static void test_pipeline_runs_all_stages() {
 // exactly once per stage — the chain is advanced by the origin even when another node
 // did the work.
 static void test_pipeline_survives_remote_execution() {
-    constexpr int NUM_REQUESTS = 30;
+    // Sized so the batch represents tens of milliseconds of real work. The property
+    // under test is that stolen stages are handled correctly; "a steal happened at all"
+    // is only a precondition for that, and with a short batch it becomes a race against
+    // the helper's steal-loop backoff rather than anything meaningful.
+    constexpr int NUM_REQUESTS = 200;
+    constexpr uint32_t SEQ_LEN = 1024;   // quadratic cost: ~260us per inference stage
 
     JobManager::register_handlers("cpu");
 
@@ -138,7 +144,7 @@ static void test_pipeline_survives_remote_execution() {
     for (int i = 0; i < NUM_REQUESTS; ++i) {
         Request r;
         r.kind            = ModelKind::TextTransformer;
-        r.sequence_length = 256;
+        r.sequence_length = SEQ_LEN;
         jobs.submit(r);
     }
     jobs.wait_all();
@@ -160,11 +166,76 @@ static void test_pipeline_survives_remote_execution() {
     coord.stop();
 }
 
+// Phase 12: the inference stage running a real ONNX model rather than a busy loop.
+//
+// Skipped, not failed, when the model file is absent or the build has no ONNX Runtime:
+// the model is a 13MB artefact that is deliberately not in the repo, and every other
+// guarantee in this suite holds regardless of whether it is present.
+static void test_onnx_inference_stage() {
+    const char* model_path = "models/mobilenet_v2.onnx";
+
+    std::FILE* f = std::fopen(model_path, "rb");
+    if (!f) {
+        std::printf("SKIP test_onnx_inference_stage: no %s "
+                    "(run: python3 scripts/export_model.py %s)\n", model_path, model_path);
+        return;
+    }
+    std::fclose(f);
+
+    JobManager::register_handlers("cpu", model_path);
+
+    if (!global_model().loaded()) {
+        std::printf("SKIP test_onnx_inference_stage: built without ONNX Runtime\n");
+        return;
+    }
+
+    uint64_t runs_before = global_model().runs();
+
+    constexpr int NUM_IMAGE = 6;
+    constexpr int NUM_TEXT  = 4;
+
+    Runtime rt(2);
+    JobManager jobs(rt, "cpu");
+
+    for (int i = 0; i < NUM_IMAGE; ++i) {
+        Request r;
+        r.kind         = ModelKind::ImageClassifier;
+        r.image_pixels = 224 * 224;
+        r.batch_size   = 1;
+        jobs.submit(r);
+    }
+    for (int i = 0; i < NUM_TEXT; ++i) {
+        Request r;
+        r.kind            = ModelKind::TextTransformer;
+        r.sequence_length = 128;
+        jobs.submit(r);
+    }
+
+    jobs.wait_all();
+    rt.shutdown();
+
+    CHECK(jobs.completed() == (uint64_t)(NUM_IMAGE + NUM_TEXT));
+    CHECK(rt.local_executed() == (uint64_t)(NUM_IMAGE + NUM_TEXT) * 4);
+
+    // Exactly one forward pass per image request — the model ran for the inference
+    // stage and only for it, not for decode/preprocess/postprocess.
+    uint64_t ran = global_model().runs() - runs_before;
+    CHECK(ran == (uint64_t)NUM_IMAGE);
+
+    std::printf("PASS test_onnx_inference_stage: %llu real forward passes "
+                "for %d image requests (%d text requests stayed simulated)\n",
+                (unsigned long long)ran, NUM_IMAGE, NUM_TEXT);
+
+    // Leave the registry on the simulated path so test ordering cannot matter.
+    JobManager::register_handlers("cpu");
+}
+
 int main() {
     test_stage_payload_roundtrip();
     test_cost_model_is_skewed();
     test_pipeline_runs_all_stages();
     test_pipeline_survives_remote_execution();
+    test_onnx_inference_stage();
     std::printf("All tests passed.\n");
     return 0;
 }

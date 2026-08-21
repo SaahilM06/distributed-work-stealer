@@ -32,6 +32,29 @@ add_link_options(
 # ── Threads ──────────────────────────────────────────────────────────────────
 find_package(Threads REQUIRED)
 
+# ── ONNX Runtime (optional) ──────────────────────────────────────────────────
+# Real model execution for the inference stage. Optional on purpose: without it the
+# project still builds and runs against the simulated cost model, so the scheduling
+# work does not depend on having a model runtime installed.
+option(HYDRA_WITH_ONNX "Run the inference stage on a real ONNX model" ON)
+
+set(HYDRA_ONNX_FOUND FALSE)
+if(HYDRA_WITH_ONNX)
+  find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+    PATHS /opt/homebrew/include/onnxruntime /usr/local/include/onnxruntime
+          /opt/homebrew/include /usr/local/include
+    PATH_SUFFIXES onnxruntime)
+  find_library(ONNXRUNTIME_LIB onnxruntime
+    PATHS /opt/homebrew/lib /usr/local/lib)
+
+  if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIB)
+    set(HYDRA_ONNX_FOUND TRUE)
+    message(STATUS "ONNX Runtime : ${ONNXRUNTIME_LIB}")
+  else()
+    message(STATUS "ONNX Runtime : not found — inference stage will use simulated cost")
+  endif()
+endif()
+
 # ── Core library: hydra_runtime ──────────────────────────────────────────────
 # All reusable runtime + metrics code lives here.
 # Apps and tests link against this target.
@@ -45,6 +68,7 @@ add_library(hydra_runtime STATIC
   src/net/Protocol.cpp
   src/net/Socket.cpp
   src/inference/InferenceJob.cpp
+  src/inference/OnnxModel.cpp
   src/inference/HttpServer.cpp
   src/inference/JobManager.cpp
   src/cluster/Coordinator.cpp
@@ -58,6 +82,12 @@ target_include_directories(hydra_runtime PUBLIC
 target_link_libraries(hydra_runtime PUBLIC
   Threads::Threads
 )
+
+if(HYDRA_ONNX_FOUND)
+  target_include_directories(hydra_runtime PUBLIC ${ONNXRUNTIME_INCLUDE_DIR})
+  target_link_libraries(hydra_runtime PUBLIC ${ONNXRUNTIME_LIB})
+  target_compile_definitions(hydra_runtime PUBLIC HYDRA_WITH_ONNX)
+endif()
 
 # ── App: hydra_bench ─────────────────────────────────────────────────────────
 add_executable(hydra_bench apps/hydra_bench.cpp)

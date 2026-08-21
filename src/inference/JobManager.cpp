@@ -1,4 +1,5 @@
 #include "inference/JobManager.hpp"
+#include "inference/OnnxModel.hpp"
 #include "runtime/TaskRegistry.hpp"
 
 #include <algorithm>
@@ -7,23 +8,46 @@
 
 namespace inference {
 
-// Burns CPU proportional to the stage's cost. Stands in for real model execution; the
-// point of the exercise is the scheduling, and a real model gets swapped in at Phase 12.
+// Burns CPU proportional to the stage's cost. Used for the stages that stay simulated,
+// and for the inference stage when no ONNX model is loaded.
 static void burn(uint32_t units) {
     volatile uint64_t x = 0;
     for (uint32_t i = 0; i < units; ++i) x += i;
 }
 
-void JobManager::register_handlers(const std::string& node_label) {
+void JobManager::register_handlers(const std::string& node_label,
+                                   const std::string& model_path) {
     // A "gpu" node runs the inference stage far faster than a cpu node. Everything
     // else runs at the same speed everywhere. This asymmetry is what makes capability
     // routing worth doing at all — without it, every node is interchangeable and the
     // adaptive policy has nothing to be smart about.
     const uint32_t infer_divisor = (node_label == "gpu") ? 8u : 1u;
 
-    auto run_stage = [infer_divisor](const std::vector<uint8_t>& payload) {
+    bool use_model = false;
+    if (!model_path.empty()) {
+        use_model = global_model().load(model_path, /*intra_op_threads=*/1);
+        if (!use_model) {
+            std::fprintf(stderr,
+                         "[inference] falling back to the simulated cost model\n");
+        }
+    }
+
+    auto run_stage = [infer_divisor, use_model](const std::vector<uint8_t>& payload) {
         StagePayload p;
         if (!decode_stage(payload, p)) return;
+
+        // The inference stage is the one that becomes real: decode/preprocess/
+        // postprocess remain simulated, since the interesting scheduling question is
+        // about the expensive stage and where it runs.
+        if (use_model && p.stage == Stage::Infer && p.kind == ModelKind::ImageClassifier) {
+            // Batch is capped so one request cannot monopolise a worker for seconds —
+            // a real serving system would enforce the same bound.
+            uint32_t batch = p.batch_size ? p.batch_size : 1;
+            if (batch > 8) batch = 8;
+            if (global_model().run(batch)) return;
+            // A failed run falls through to the simulated path rather than silently
+            // completing a stage that did no work.
+        }
 
         uint32_t units = stage_cost_units(p);
         if (p.stage == Stage::Infer) units /= infer_divisor;

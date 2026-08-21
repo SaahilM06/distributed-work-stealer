@@ -39,7 +39,13 @@ public:
 
     // Registers the stage handlers. Must be called on every node in the cluster, and
     // before the runtime starts taking work.
-    static void register_handlers(const std::string& node_label);
+    //
+    // If `model_path` is non-empty and the build has ONNX Runtime, the inference stage
+    // executes that model for real; otherwise it falls back to the simulated cost
+    // model. Everything else about the pipeline is identical either way, so the same
+    // scheduler and the same benchmarks apply to both.
+    static void register_handlers(const std::string& node_label,
+                                  const std::string& model_path = "");
 
     uint64_t submit(const Request& req);
 

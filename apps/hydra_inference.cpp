@@ -11,6 +11,7 @@
 #include "inference/HttpServer.hpp"
 #include "inference/InferenceJob.hpp"
 #include "inference/JobManager.hpp"
+#include "inference/OnnxModel.hpp"
 #include "metrics/Metrics.hpp"
 
 #include <chrono>
@@ -56,6 +57,7 @@ int main(int argc, char** argv) {
     uint16_t http_port    = 0;      // 0 = kernel picks
     int      bench_requests = 0;    // >0 runs a closed-loop benchmark instead of serving
     int      run_secs     = 30;
+    std::string model_path;         // empty = simulated inference cost
 
     for (int i = 1; i < argc; ++i) {
         auto next = [&]() { return (i + 1 < argc) ? argv[++i] : nullptr; };
@@ -80,6 +82,8 @@ int main(int argc, char** argv) {
                     return 2;
                 }
             }
+        } else if (std::strcmp(argv[i], "--model") == 0) {
+            if (const char* v = next()) model_path = v;
         } else if (std::strcmp(argv[i], "--bench") == 0) {
             if (const char* v = next()) bench_requests = std::atoi(v);
         } else if (std::strcmp(argv[i], "--seconds") == 0) {
@@ -89,7 +93,7 @@ int main(int argc, char** argv) {
 
     // Handlers must be registered before the runtime starts, and identically on every
     // node — that is what lets a stage stolen from another machine actually run here.
-    JobManager::register_handlers(cfg.label);
+    JobManager::register_handlers(cfg.label, model_path);
 
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
@@ -106,9 +110,11 @@ int main(int argc, char** argv) {
     // ── benchmark mode ──────────────────────────────────────────────────────
     if (bench_requests > 0) {
         std::mt19937 rng(12345);   // fixed seed: same workload across policies
-        std::printf("[infer %u] label=%s policy=%s submitting %d requests\n",
+        std::printf("[infer %u] label=%s policy=%s model=%s submitting %d requests\n",
                     node.node_id(), cfg.label.c_str(),
-                    steal_policy_name(cfg.policy), bench_requests);
+                    steal_policy_name(cfg.policy),
+                    global_model().loaded() ? global_model().path().c_str() : "simulated",
+                    bench_requests);
         std::fflush(stdout);
 
         auto start = std::chrono::steady_clock::now();
@@ -132,6 +138,10 @@ int main(int argc, char** argv) {
                     (unsigned long long)node.tasks_stolen_in(),
                     (unsigned long long)node.tasks_stolen_out(),
                     (unsigned long long)node.tasks_reassigned());
+        if (global_model().loaded()) {
+            std::printf("[infer %u] onnx forward passes: %llu\n",
+                        node.node_id(), (unsigned long long)global_model().runs());
+        }
         std::fflush(stdout);
 
         char path[256];
@@ -209,7 +219,9 @@ int main(int argc, char** argv) {
              << ",\"stolen_in\":" << node.tasks_stolen_in()
              << ",\"stolen_out\":" << node.tasks_stolen_out()
              << ",\"reassigned\":" << node.tasks_reassigned()
-             << ",\"steal_success_rate\":" << node.steal_success_rate() << "}";
+             << ",\"steal_success_rate\":" << node.steal_success_rate()
+             << ",\"model\":\"" << (global_model().loaded() ? "onnx" : "simulated") << "\""
+             << ",\"onnx_runs\":" << global_model().runs() << "}";
         res.body = body.str();
         return res;
     });
