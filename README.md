@@ -247,9 +247,6 @@ thread pool to the distributed inference engine — with what each phase changed
 
 ## Things that went wrong
 
-Worth reading if you care about the engineering rather than the numbers; each of these
-is written up in `ROADMAP.md` or the relevant results file.
-
 - **The test suite wasn't testing anything.** `-DNDEBUG` in the default build had been
   deleting every assertion, so the suite printed "All tests passed" while checking
   nothing. Fixed with a `CHECK()` macro that survives the optimiser.
@@ -263,3 +260,7 @@ is written up in `ROADMAP.md` or the relevant results file.
 - **Idle workers stole CPU from busy ones.** Workers spun on `yield()`, which is
   harmless in one process and destructive across several — idle nodes were burning the
   cores a loaded node needed, hiding the entire benefit of remote stealing.
+
+
+References 
+https://dl.acm.org/doi/pdf/10.1145/1073970.1073974
